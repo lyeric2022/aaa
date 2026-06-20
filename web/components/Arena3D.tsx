@@ -85,9 +85,11 @@ function addG1UrdfSkin(robot: THREE.Group, accent: string) {
     "/models/g1_description/g1_29dof_mode_15.urdf",
     (urdf: URDFRobotLike) => {
       urdf.name = "g1_urdf_skin";
+      // URDFLoader preserves ROS coordinates (Z-up). The arena is Three.js
+      // Y-up, so rotate the whole robot into the arena and lift its feet.
       urdf.rotation.x = -Math.PI / 2;
-      urdf.position.y = 0.02;
-      urdf.scale.setScalar(1);
+      urdf.position.y = 0.82;
+      urdf.scale.setScalar(1.08);
       urdf.traverse((obj) => {
         obj.castShadow = true;
         obj.receiveShadow = true;
@@ -182,7 +184,7 @@ function setRobotPose(
   hitFlash: number,
 ) {
   const direction = side === "left" ? 1 : -1;
-  robot.rotation.y = side === "left" ? Math.PI / 2 : -Math.PI / 2;
+  robot.rotation.y = side === "left" ? -Math.PI / 2 : Math.PI / 2;
   robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
 
   const rightUpper = robot.getObjectByName("rightUpperArm");
