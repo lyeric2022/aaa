@@ -1,0 +1,40 @@
+{
+  "stats": {
+    "duration_sec": 10.74,
+    "fps": 50.0,
+    "frame_count": 537,
+    "joint_count": 29,
+    "peak_velocity": 30.4978,
+    "mean_velocity": 0.3816,
+    "smoothness": 98.2,
+    "jerk_score": 89.7,
+    "extension_risk": 56.8,
+    "recovery_score": 40.3,
+    "deploy_score": 60.7,
+    "verdict": "needs_edits"
+  },
+  "move_card": {
+    "id": "ghost_jab_combo",
+    "name": "Ghost Jab Combo",
+    "source": "ultimate_bots_studio",
+    "motion_dir": "/Users/eric/personal/hackathons/assets/motions/ghost_jab_combo_extracted",
+    "sonic_zip": "assets/motions/ghost_jab_combo_sonic.zip",
+    "attack_type": "strike_combo",
+    "studio_sonic_validated": true,
+    "stats": {
+      "speed": 67.09516,
+      "power": 13.356,
+      "smoothness": 98.2,
+      "balance_risk": 69.03999999999999,
+      "recovery": 40.3,
+      "deployability": 60.7
+    },
+    "verdict": "needs_edits",
+    "coach_feedback": "Reduce peak spin speed or widen stance before the fastest segment.",
+    "pipeline": {
+      "data": "human recording + studio retarget",
+      "eval": "joint trajectory heuristics",
+      "deploy": "sonic zip validated in studio simulate"
+    }
+  }
+}

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ghost Fighter — Move Card</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --card: #14141f;
+      --border: #2a2a3d;
+      --text: #e8e8f0;
+      --muted: #8888a0;
+      --safe: #3dd68c;
+      --warn: #f5a623;
+      --bad: #ff5c5c;
+      --accent: #7c5cff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+    .wrap { max-width: 520px; margin: 0 auto; }
+    h1 { font-size: 1.1rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5rem; }
+    .title { font-size: 2rem; font-weight: 700; margin-bottom: 1.5rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.5rem;
+    }
+    .verdict {
+      display: inline-block;
+      padding: 0.35rem 0.75rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 1rem;
+    }
+    .verdict.safe { background: rgba(61,214,140,0.15); color: var(--safe); }
+    .verdict.needs_edits { background: rgba(245,166,35,0.15); color: var(--warn); }
+    .verdict.unsafe { background: rgba(255,92,92,0.15); color: var(--bad); }
+    .badge {
+      display: inline-block;
+      margin-left: 0.5rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.65rem;
+      background: rgba(124,92,255,0.2);
+      color: var(--accent);
+    }
+    .stat { margin-bottom: 1rem; }
+    .stat label { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; }
+    .bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+    .bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), #a78bfa); border-radius: 4px; }
+    .bar.risk span { background: linear-gradient(90deg, var(--warn), var(--bad)); }
+    .coach {
+      margin-top: 1.25rem;
+      padding: 1rem;
+      background: rgba(124,92,255,0.08);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .meta { margin-top: 1.25rem; font-size: 0.8rem; color: var(--muted); line-height: 1.6; }
+    .pipeline { margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .pipeline span {
+      font-size: 0.7rem;
+      padding: 0.3rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Ghost Fighter</h1>
+    <div class="title" id="name">Loading…</div>
+    <div class="card" id="card">Loading move card…</div>
+  </div>
+  <script>
+    fetch('../move_cards/ghost_jab_combo.json')
+      .then(r => r.json())
+      .then(data => {
+        const m = data.move_card;
+        document.getElementById('name').textContent = m.name;
+        const verdictClass = m.verdict;
+        const studio = m.studio_sonic_validated
+          ? '<span class="badge">Studio SONIC ✓</span>' : '';
+        const stats = m.stats;
+        const statRow = (key, label, risk) => `
+          <div class="stat">
+            <label><span>${label}</span><span>${Math.round(stats[key])}</span></label>
+            <div class="bar ${risk ? 'risk' : ''}"><span style="width:${Math.min(100, stats[key])}%"></span></div>
+          </div>`;
+        document.getElementById('card').innerHTML = `
+          <div class="verdict ${verdictClass}">${m.verdict.replace('_', ' ')}${studio}</div>
+          ${statRow('speed', 'Speed')}
+          ${statRow('power', 'Power')}
+          ${statRow('smoothness', 'Smoothness')}
+          ${statRow('balance_risk', 'Balance Risk', true)}
+          ${statRow('recovery', 'Recovery')}
+          ${statRow('deployability', 'Deployability')}
+          <div class="coach"><strong>Coach:</strong> ${m.coach_feedback}</div>
+          <div class="meta">
+            ${data.stats.duration_sec}s · ${data.stats.frame_count} frames · ${data.stats.joint_count} joints<br>
+            ${m.attack_type.replace('_', ' ')}
+          </div>
+          <div class="pipeline">
+            <span>Data ✓</span><span>Eval ✓</span><span>Deploy → Plaza</span>
+          </div>`;
+      })
+      .catch(() => {
+        document.getElementById('card').textContent = 'Run: python3 scripts/analyze_motion.py';
+      });
+  </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+Motion Information: untitled_project
+==================================================
+
+source_fps: 30
+target_fps: 50
+source_frames: 323
+target_frames: 537

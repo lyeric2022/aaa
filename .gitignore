@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.env.local
+node_modules/
+.next/
+dist/
+web/node_modules/
+web/.next/
+web/data/
+web/public/uploads/
+assets/demo/*.mp4

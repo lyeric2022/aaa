@@ -1,0 +1,7 @@
+Metadata for: untitled_project
+==============================
+
+Body part indexes:
+[ 0]
+
+Total timesteps: 537
