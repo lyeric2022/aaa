@@ -90,6 +90,35 @@ export function VerificationPanel({ card }: { card: MoveCard }) {
         />
       </div>
 
+      {card.verification?.metrics && (
+        <div className="mt-5 grid gap-3 rounded-xl border border-[#2a2a3d] bg-[#101018] p-4 text-sm sm:grid-cols-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.16em] text-[#8888a0]">
+              Torso Tilt
+            </p>
+            <p className="mt-1 font-semibold text-white">
+              {card.verification.metrics.torso_tilt_deg ?? "n/a"}°
+            </p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-[0.16em] text-[#8888a0]">
+              COM Drift
+            </p>
+            <p className="mt-1 font-semibold text-white">
+              {card.verification.metrics.com_drift_m ?? "n/a"} m
+            </p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-[0.16em] text-[#8888a0]">
+              Fall Detected
+            </p>
+            <p className="mt-1 font-semibold text-white">
+              {card.verification.metrics.fall_detected ? "yes" : "no"}
+            </p>
+          </div>
+        </div>
+      )}
+
       {card.verification?.video_url ? (
         <video
           src={card.verification.video_url}

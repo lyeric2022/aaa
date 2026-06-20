@@ -2,9 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import URDFLoader from "urdf-loader";
 
 type Trajectory = {
   fps: number;
+  playback_fps?: number;
+  duration_sec?: number;
   frames: number[][];
   joint_order: string;
 };
@@ -27,6 +31,42 @@ type JointPoints = {
   rFoot: THREE.Vector3;
 };
 
+type URDFRobotLike = THREE.Object3D & {
+  setJointValue?: (jointName: string, value: number) => void;
+};
+
+const G1_JOINT_ORDER = [
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_yaw_joint",
+  "left_knee_joint",
+  "left_ankle_pitch_joint",
+  "left_ankle_roll_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_yaw_joint",
+  "right_knee_joint",
+  "right_ankle_pitch_joint",
+  "right_ankle_roll_joint",
+  "waist_yaw_joint",
+  "waist_roll_joint",
+  "waist_pitch_joint",
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "left_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "right_wrist_roll_joint",
+  "right_wrist_pitch_joint",
+  "right_wrist_yaw_joint",
+] as const;
+
 const SEGMENTS: [keyof JointPoints, keyof JointPoints][] = [
   ["pelvis", "chest"],
   ["chest", "head"],
@@ -43,6 +83,68 @@ const SEGMENTS: [keyof JointPoints, keyof JointPoints][] = [
   ["rHip", "rKnee"],
   ["rKnee", "rFoot"],
 ];
+
+function formatTime(seconds: number) {
+  const safeSeconds = Math.max(0, seconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const wholeSeconds = Math.floor(safeSeconds % 60);
+  const millis = Math.floor((safeSeconds % 1) * 1000);
+  return `${minutes}:${String(wholeSeconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function setPlaceholderVisible(robot: THREE.Group, visible: boolean) {
+  for (const child of robot.children) {
+    if (child.userData.placeholder) child.visible = visible;
+  }
+}
+
+function tintRobot(robot: THREE.Object3D) {
+  robot.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const material = mesh.material as THREE.MeshStandardMaterial | THREE.MeshPhongMaterial;
+    if (material && "color" in material) {
+      material.color.lerp(new THREE.Color("#7c5cff"), 0.06);
+      material.needsUpdate = true;
+    }
+  });
+}
+
+function addG1UrdfSkin(robot: THREE.Group) {
+  const loader = new URDFLoader();
+  loader.load(
+    "/models/g1_description/g1_29dof_mode_15.urdf",
+    (urdf: URDFRobotLike) => {
+      urdf.name = "g1_replay_skin";
+      urdf.rotation.x = -Math.PI / 2;
+      urdf.position.y = 0.82;
+      urdf.scale.setScalar(1.08);
+      urdf.traverse((obj) => {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      });
+      tintRobot(urdf);
+      robot.userData.urdf = urdf;
+      robot.add(urdf);
+    },
+    undefined,
+    (err) => {
+      console.error("Failed to load replay G1 URDF", err);
+      setPlaceholderVisible(robot, true);
+    },
+  );
+}
+
+function applyFrameToUrdf(robot: THREE.Group, frame: number[]) {
+  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
+  const setJointValue = urdf?.setJointValue;
+  if (!setJointValue) return;
+
+  G1_JOINT_ORDER.forEach((jointName, index) => {
+    const value = frame[index];
+    if (Number.isFinite(value)) setJointValue.call(urdf, jointName, value);
+  });
+}
 
 function limb(
   origin: THREE.Vector3,
@@ -145,6 +247,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
   const [trajectory, setTrajectory] = useState<Trajectory | null>(null);
   const [frameIndex, setFrameIndex] = useState(0);
   const [error, setError] = useState("");
+  const [isPlaying, setIsPlaying] = useState(true);
 
   useEffect(() => {
     fetch(`/api/moves/${moveId}/trajectory`)
@@ -164,7 +267,8 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
     const activeTrajectory = trajectory;
     const host = hostRef.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#05050a");
+    scene.background = new THREE.Color("#060707");
+    scene.fog = new THREE.Fog("#060707", 4.2, 12);
 
     const camera = new THREE.PerspectiveCamera(
       42,
@@ -172,24 +276,48 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
       0.1,
       100,
     );
-    camera.position.set(2.4, 1.75, 4.1);
-    camera.lookAt(0, 1.05, 0);
+    camera.position.set(1.15, 1.25, 5.6);
+    camera.lookAt(0, 0.95, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(host.clientWidth, 520);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.9;
     host.appendChild(renderer.domElement);
 
-    scene.add(new THREE.AmbientLight("#ffffff", 1.35));
-    const key = new THREE.DirectionalLight("#a78bfa", 3.2);
-    key.position.set(2, 4, 3);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 0.95, 0);
+    controls.minDistance = 2.4;
+    controls.maxDistance = 8;
+
+    scene.add(new THREE.AmbientLight("#b9c3d6", 0.65));
+    const key = new THREE.DirectionalLight("#e7eefc", 2.5);
+    key.position.set(-2.5, 4.8, 3.2);
+    key.castShadow = true;
     scene.add(key);
-    const fill = new THREE.DirectionalLight("#3dd68c", 1.2);
-    fill.position.set(-3, 2, -2);
+    const fill = new THREE.DirectionalLight("#2f6dff", 0.7);
+    fill.position.set(4, 1.8, -3);
     scene.add(fill);
 
-    const grid = new THREE.GridHelper(5, 20, "#3a345f", "#171729");
+    const grid = new THREE.GridHelper(16, 32, "#1f2630", "#10151d");
+    grid.position.y = -0.01;
     scene.add(grid);
+
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(16, 16),
+      new THREE.MeshStandardMaterial({
+        color: "#090b0f",
+        emissive: "#030405",
+        metalness: 0.05,
+        roughness: 0.8,
+      }),
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    scene.add(floor);
 
     const robot = new THREE.Group();
     scene.add(robot);
@@ -204,57 +332,79 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
       emissive: "#1d124f",
       metalness: 0.2,
       roughness: 0.35,
+      transparent: true,
+      opacity: 0.38,
     });
     const green = new THREE.MeshStandardMaterial({
       color: "#3dd68c",
       emissive: "#0d3b27",
       metalness: 0.15,
       roughness: 0.3,
+      transparent: true,
+      opacity: 0.42,
     });
     const orange = new THREE.MeshStandardMaterial({
       color: "#f5a623",
       emissive: "#4a2b05",
       metalness: 0.1,
       roughness: 0.4,
+      transparent: true,
+      opacity: 0.68,
     });
 
     const bones = SEGMENTS.map((_, i) => {
       const mesh = new THREE.Mesh(boneGeo, i < 4 ? purple : green);
+      mesh.userData.placeholder = true;
       robot.add(mesh);
       return mesh;
     });
     const joints = Object.keys(pointsFromFrame(activeTrajectory.frames[0], 0)).map(() => {
       const mesh = new THREE.Mesh(jointGeo, orange);
+      mesh.userData.placeholder = true;
       robot.add(mesh);
       return mesh;
     });
     const torso = new THREE.Mesh(torsoGeo, purple);
+    torso.userData.placeholder = true;
     robot.add(torso);
     const head = new THREE.Mesh(headGeo, orange);
+    head.userData.placeholder = true;
     robot.add(head);
 
     const trail = Array.from({ length: 18 }, () => {
       const mesh = new THREE.Mesh(trailGeo, green);
       mesh.material = green.clone();
+      mesh.userData.placeholder = true;
       robot.add(mesh);
       return mesh;
     });
 
+    addG1UrdfSkin(robot);
+
     const clock = new THREE.Clock();
     let raf = 0;
     const matrixUp = new THREE.Vector3(0, 1, 0);
+    const playbackFps =
+      activeTrajectory.playback_fps ??
+      activeTrajectory.frames.length /
+        Math.max(
+          activeTrajectory.duration_sec ??
+            activeTrajectory.frames.length / Math.max(activeTrajectory.fps, 1),
+          0.001,
+        );
 
     function renderLoop() {
       raf = requestAnimationFrame(renderLoop);
       const elapsed = clock.getElapsedTime();
       if (playingRef.current) {
         frameRef.current =
-          Math.floor(elapsed * activeTrajectory.fps) % activeTrajectory.frames.length;
+          Math.floor(elapsed * playbackFps) % activeTrajectory.frames.length;
       }
 
       const frame = activeTrajectory.frames[frameRef.current];
       const pts = pointsFromFrame(frame, frameRef.current);
       const values = Object.values(pts);
+      applyFrameToUrdf(robot, frame);
 
       SEGMENTS.forEach(([a, b], i) => updateBone(bones[i], pts[a], pts[b]));
       values.forEach((p, i) => joints[i].position.copy(p));
@@ -273,7 +423,8 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
         dot.scale.setScalar(1 - i / trail.length);
       });
 
-      robot.rotation.y = Math.sin(elapsed * 0.28) * 0.25;
+      robot.rotation.y = 0;
+      controls.update();
       renderer.render(scene, camera);
       setFrameIndex(frameRef.current);
     }
@@ -291,6 +442,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
+      controls.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);
     };
@@ -305,29 +457,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-[#2a2a3d] bg-[#101018] shadow-2xl shadow-[#7c5cff]/10">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#2a2a3d] p-4">
-        <div>
-          <p className="text-xs uppercase tracking-[0.18em] text-[#3dd68c]">
-            3D Kinematic Replay
-          </p>
-          <h2 className="text-lg font-semibold">
-            SONIC joint trajectory on a robot body
-          </h2>
-          <p className="mt-1 text-xs text-[#8888a0]">
-            Visual preview from `joint_pos.csv`; MuJoCo/GEAR is the next
-            verification step.
-          </p>
-        </div>
-        <button
-          onClick={() => {
-            playingRef.current = !playingRef.current;
-          }}
-          className="rounded-lg bg-[#7c5cff] px-3 py-1.5 text-sm font-semibold"
-        >
-          Play / Pause
-        </button>
-      </div>
+    <div className="overflow-hidden rounded-2xl border border-[#171a22] bg-[#050607] shadow-2xl shadow-black/50">
       <div className="relative">
         {!trajectory && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-[#05050a] text-sm text-[#8888a0]">
@@ -335,16 +465,72 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
           </div>
         )}
         <div ref={hostRef} className="h-[520px]" />
-        <div className="pointer-events-none absolute left-4 top-4 rounded-lg border border-[#2a2a3d] bg-black/50 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
-          Purple torso · green limbs · orange joints · right-hand trail
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-black/70 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/80 to-transparent" />
+
+        <div className="absolute left-3 top-3 flex gap-2">
+          <button className="rounded border border-white/10 bg-black/40 px-3 py-1.5 text-[11px] text-white/50 backdrop-blur">
+            ↩ Undo
+          </button>
+          <button className="rounded border border-white/10 bg-black/40 px-3 py-1.5 text-[11px] text-white/50 backdrop-blur">
+            ↪ Redo
+          </button>
         </div>
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#2a2a3d] p-4 text-xs text-[#8888a0]">
-        <span>
-          Frame {frameIndex + 1}/{trajectory?.frames.length ?? 0} ·{" "}
-          {trajectory?.fps ?? 50} Hz
-        </span>
-        <span>{trajectory?.joint_order ?? "SONIC joint trajectory"}</span>
+
+        <div className="pointer-events-none absolute bottom-12 left-3 rounded-sm px-1 text-[9px] uppercase tracking-[0.14em] text-white/45">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#6aa3ff]" />
+            Reference motion
+          </div>
+          <div className="mt-1.5 flex items-center gap-2">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#dce6f3]" />
+            GEAR-SONIC simulation
+          </div>
+        </div>
+
+        <div className="absolute bottom-0 left-0 right-0 border-t border-white/10 bg-black/35 px-4 py-2 backdrop-blur-sm">
+          <div className="flex items-center justify-center gap-3 text-[11px] text-white/55">
+            <button
+              onClick={() => {
+                frameRef.current = 0;
+                setFrameIndex(0);
+              }}
+              className="rounded border border-white/10 bg-[#0c1118] px-2.5 py-1 text-white/60"
+              title="Go to start"
+              aria-label="Go to start"
+            >
+              ⏮
+            </button>
+            <button
+              onClick={() => {
+                const next = !playingRef.current;
+                playingRef.current = next;
+                setIsPlaying(next);
+              }}
+              className="rounded border border-[#a6ff3d]/40 bg-[#a6ff3d]/10 px-3 py-1 font-semibold text-[#a6ff3d]"
+              title="Play / Pause"
+              aria-label={isPlaying ? "Pause" : "Play"}
+            >
+              {isPlaying ? "Ⅱ" : "▶"}
+            </button>
+            <span>
+              {trajectory
+                ? formatTime(
+                    (frameIndex / Math.max(trajectory.frames.length - 1, 1)) *
+                      (trajectory.duration_sec ??
+                        trajectory.frames.length / Math.max(trajectory.fps, 1)),
+                  )
+                : "0:00.000"}{" "}
+              /{" "}
+              {trajectory
+                ? formatTime(
+                    trajectory.duration_sec ??
+                      trajectory.frames.length / Math.max(trajectory.fps, 1),
+                  )
+                : "0:00.000"}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

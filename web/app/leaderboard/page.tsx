@@ -1,9 +1,8 @@
-import { seedDemoMove, listMoves, listFighters } from "@/lib/storage";
+import { listMoves, listFighters } from "@/lib/storage";
 import type { LeaderboardEntry } from "@/lib/types";
 import { VerdictBadge } from "@/components/StatBar";
 
 export default async function LeaderboardPage() {
-  await seedDemoMove();
   const [moves, fighters] = await Promise.all([listMoves(), listFighters()]);
 
   const moveEntries: LeaderboardEntry[] = moves

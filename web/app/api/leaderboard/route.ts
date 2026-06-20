@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { seedDemoMove, listMoves, listFighters } from "@/lib/storage";
+import { listMoves, listFighters } from "@/lib/storage";
 import type { LeaderboardEntry } from "@/lib/types";
 
 export async function GET() {
-  await seedDemoMove();
   const [moves, fighters] = await Promise.all([listMoves(), listFighters()]);
 
   const moveEntries: LeaderboardEntry[] = moves

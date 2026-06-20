@@ -1,9 +1,8 @@
 import Link from "next/link";
-import { seedDemoMove, listMoves } from "@/lib/storage";
+import { listMoves } from "@/lib/storage";
 import { VerdictBadge } from "@/components/StatBar";
 
 export default async function HomePage() {
-  await seedDemoMove();
   const moves = await listMoves();
 
   return (

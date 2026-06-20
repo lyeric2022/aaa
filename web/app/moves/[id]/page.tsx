@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getMove, seedDemoMove } from "@/lib/storage";
+import { getMove } from "@/lib/storage";
 import { MoveCardView } from "@/components/MoveCardView";
 import { PlazaUpload } from "@/components/PlazaUpload";
 import { RobotReplay3D } from "@/components/RobotReplay3D";
@@ -10,7 +10,6 @@ export default async function MovePage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await seedDemoMove();
   const { id } = await params;
   const record = await getMove(id);
   if (!record) notFound();
