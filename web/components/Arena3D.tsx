@@ -184,7 +184,7 @@ function setRobotPose(
   hitFlash: number,
 ) {
   const direction = side === "left" ? 1 : -1;
-  robot.rotation.y = side === "left" ? -Math.PI / 2 : Math.PI / 2;
+  robot.rotation.y = side === "left" ? -Math.PI / 2 : 0;
   robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
 
   const rightUpper = robot.getObjectByName("rightUpperArm");
