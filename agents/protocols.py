@@ -18,13 +18,19 @@ from core import STAT_KEYS  # re-exported; single source of truth lives in core
 
 COACH_PROTOCOL_NAME = "ghost-fighter-move-fix"
 COACH_PROTOCOL_VERSION = "1.0.0"
+WEB_JUDGE_PROTOCOL_NAME = "ghost-fighter-web-judge"
+WEB_JUDGE_PROTOCOL_VERSION = "1.0.0"
 
 __all__ = [
     "STAT_KEYS",
     "COACH_PROTOCOL_NAME",
     "COACH_PROTOCOL_VERSION",
+    "WEB_JUDGE_PROTOCOL_NAME",
+    "WEB_JUDGE_PROTOCOL_VERSION",
     "MoveFixRequest",
     "MoveFixResponse",
+    "WebJudgeRequest",
+    "WebJudgeResponse",
 ]
 
 
@@ -46,3 +52,26 @@ class MoveFixResponse(Model):
     request_id: str
     fixes: dict[str, str]
     summary: str
+
+
+class WebJudgeRequest(Model):
+    """Web bridge -> Judge. Structured request/response entry point for Next.js."""
+
+    request_id: str
+    move_name: str
+    stats: dict[str, float]
+
+
+class WebJudgeResponse(Model):
+    """Judge -> web bridge. Same shape the frontend displays."""
+
+    request_id: str
+    move_name: str
+    normalized_stats: dict[str, float]
+    deployable: bool
+    score: float
+    failing_dims: list[str]
+    reasoning: str
+    coach_summary: str | None = None
+    fixes: dict[str, str] | None = None
+    error: str | None = None

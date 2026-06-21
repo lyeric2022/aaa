@@ -12,8 +12,9 @@ move card → JUDGE (safety gate + ASI:One) → if not deployable
   gate first (`balance_risk > 0.7` or `recovery < 0.3` auto-fail, LLM cannot
   override), then ASI:One for nuanced judgment + explanation.
 - **`coach_agent.py`** — returns one concrete fix per failing dimension.
-- **`protocols.py`** — the internal structured Judge↔Coach channel
-  (`MoveFixRequest` / `MoveFixResponse`), kept separate from the chat protocol.
+- **`protocols.py`** — the structured Judge↔Coach channel
+  (`MoveFixRequest` / `MoveFixResponse`) plus the Web↔Judge request/response
+  protocol, kept separate from the chat protocol.
 - **`sample_caller.py`** — local smoke test (no ASI:One UI needed).
 
 ## Setup
@@ -31,7 +32,7 @@ cp .env.example .env   # then fill in ASI_API_KEY, AGENTVERSE_API_KEY
 # 1) Start the Coach, copy its printed agent1q... address into .env as COACH_ADDRESS
 python coach_agent.py
 
-# 2) Start the Judge (reads COACH_ADDRESS), copy its address into .env as JUDGE_ADDRESS
+# 2) Start the Judge (reads COACH_ADDRESS), copy its printed address into .env as JUDGE_ADDRESS
 python judge_agent.py
 
 # 3) (optional) Smoke test without ASI:One
@@ -52,13 +53,19 @@ repo's existing `move_cards/*.json` 0–100 cards also work):
 
 Verdict shape: `{deployable: bool, score: float, failing_dims: [str], reasoning: str}`.
 
-## Web bridge (call the agent logic over HTTP)
+## Web bridge (call the real agents over HTTP)
 
-For the Next.js app to score a card without ASI:One, run the bridge:
+For the Next.js app to score a card, run the bridge after Coach and Judge are
+running:
 
 ```bash
 uvicorn web_bridge:app --port 8010 --reload
 ```
+
+The bridge POSTs a structured `WebJudgeRequest` to the running Judge uAgent at
+`JUDGE_ENDPOINT` (default `http://127.0.0.1:8001/submit`). The Judge then asks
+the Coach over the structured `MoveFixRequest` protocol at `COACH_ENDPOINT`
+(default `http://127.0.0.1:8002/submit`) when a move is not deployable.
 
 Then from the frontend:
 
@@ -71,5 +78,4 @@ const res = await fetch("http://localhost:8010/judge", {
 const result = await res.json(); // { deployable, score, failing_dims, reasoning, coach_summary?, fixes? }
 ```
 
-The bridge reuses the same `core.evaluate` (Judge → Coach) logic the agents use,
-so verdicts match the ASI:One chat path.
+If you need a non-agent fallback for UI debugging, set `BRIDGE_MODE=core`.

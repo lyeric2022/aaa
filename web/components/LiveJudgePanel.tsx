@@ -48,9 +48,9 @@ export function LiveJudgePanel({ moveId }: { moveId: string }) {
       </div>
 
       <p className="text-sm leading-relaxed text-[#8888a0]">
-        Dynamically sends this card&apos;s latest stats to the Judge logic
+        Dynamically sends this card&apos;s latest stats to the Judge uAgent
         (deterministic safety gate + ASI:One). If it is not deployable, the
-        Coach returns targeted fixes.
+        Judge consults the Coach uAgent for targeted fixes.
       </p>
 
       {status === "loading" && !result && (
@@ -80,6 +80,11 @@ export function LiveJudgePanel({ moveId }: { moveId: string }) {
             <span className="text-sm text-[#8888a0]">
               score <span className="font-semibold text-white">{result.score}</span>
             </span>
+            {result.source && (
+              <span className="rounded bg-[#7c5cff]/10 px-2 py-1 text-[11px] uppercase tracking-wide text-[#a78bfa]">
+                {result.source === "judge_uagent" ? "via Judge uAgent" : "core fallback"}
+              </span>
+            )}
           </div>
 
           {result.failing_dims.length > 0 && (

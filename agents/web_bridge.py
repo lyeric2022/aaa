@@ -1,9 +1,15 @@
-"""HTTP bridge: lets the Next.js web app call the Judge/Coach logic directly.
+"""HTTP bridge: lets the Next.js web app call the real Judge uAgent.
 
-The frontend POSTs a move card's stats; this returns the same verdict + coaching
-the agents produce on ASI:One, computed in-process via `core.evaluate` (so it
-does NOT depend on Agentverse mailbox uptime). The live agent-to-agent + ASI:One
-path still runs separately through judge_agent.py / coach_agent.py.
+The frontend POSTs a move card's stats; this bridge sends a synchronous
+WebJudgeRequest to the configured Judge agent endpoint, waits for the Judge's
+structured response, and returns the verdict + coaching to the web app.
+
+Default path:
+    Web -> web_bridge -> Judge uAgent -> Coach uAgent -> Judge -> Web
+
+If JUDGE_ADDRESS is not configured, the bridge falls back to core.evaluate() so
+local UI development still works, but the hackathon demo should run with
+JUDGE_ADDRESS set.
 
 Run:
     uvicorn web_bridge:app --port 8010 --reload
@@ -16,10 +22,12 @@ POST /judge
 
 from __future__ import annotations
 
+import asyncio
 import os
+from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -30,6 +38,10 @@ load_dotenv()
 
 # Comma-separated origins; defaults to the Next.js dev server.
 ALLOWED_ORIGINS = os.getenv("BRIDGE_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+JUDGE_ADDRESS = os.getenv("JUDGE_ADDRESS", "")
+JUDGE_ENDPOINT = os.getenv("JUDGE_ENDPOINT", f"http://127.0.0.1:{os.getenv('JUDGE_PORT', '8001')}/submit")
+BRIDGE_MODE = os.getenv("BRIDGE_MODE", "agent" if JUDGE_ADDRESS else "core")
+AGENT_TIMEOUT_SEC = float(os.getenv("AGENT_BRIDGE_TIMEOUT_SEC", "45"))
 
 app = FastAPI(title="Ghost Fighter Judge Bridge", version="1.0.0")
 app.add_middleware(
@@ -49,12 +61,66 @@ class CardIn(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True}
+    return {
+        "ok": True,
+        "mode": BRIDGE_MODE,
+        "judge_address_configured": bool(JUDGE_ADDRESS),
+        "judge_endpoint": JUDGE_ENDPOINT if BRIDGE_MODE == "agent" else None,
+    }
 
 
 @app.post("/judge")
 async def judge(card: CardIn) -> dict:
-    return await core.evaluate(card.name, card.stats)
+    if BRIDGE_MODE != "agent":
+        result = await core.evaluate(card.name, card.stats)
+        result["source"] = "core_fallback"
+        return result
+    if not JUDGE_ADDRESS:
+        raise RuntimeError("JUDGE_ADDRESS is required for BRIDGE_MODE=agent")
+
+    request_id = uuid4().hex
+    from protocols import WebJudgeRequest, WebJudgeResponse
+    from uagents.communication import send_sync_message
+    from uagents.resolver import Resolver
+
+    class StaticJudgeResolver(Resolver):
+        async def resolve(self, destination: str) -> tuple[str | None, list[str]]:
+            if destination == JUDGE_ADDRESS:
+                return JUDGE_ADDRESS, [JUDGE_ENDPOINT]
+            return None, []
+
+    message = WebJudgeRequest(
+        request_id=request_id,
+        move_name=card.name,
+        stats=card.stats,
+    )
+    try:
+        response = await asyncio.wait_for(
+            send_sync_message(
+                destination=JUDGE_ADDRESS,
+                message=message,
+                response_type=WebJudgeResponse,
+                resolver=StaticJudgeResolver(),
+                timeout=int(AGENT_TIMEOUT_SEC),
+            ),
+            timeout=AGENT_TIMEOUT_SEC + 5,
+        )
+        if not isinstance(response, WebJudgeResponse):
+            detail = getattr(response, "detail", str(response))
+            raise RuntimeError(detail)
+        result = response.model_dump()
+        result["source"] = "judge_uagent"
+        return result
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Timed out waiting for the Judge uAgent. Make sure judge_agent.py "
+                "and coach_agent.py are running and JUDGE_ENDPOINT points at the Judge /submit endpoint."
+            ),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Judge uAgent call failed: {exc}") from exc
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -116,7 +182,7 @@ _PAGE = """<!DOCTYPE html>
       <div><label class="f">speed</label><input id="speed" type="number" step="0.01" value="0.7" /></div>
     </div>
     <button id="go" onclick="run()">Judge move</button>
-    <div class="muted" style="margin-top:.5rem">Values 0–1 (or 0–100; auto-normalized).</div>
+    <div class="muted" style="margin-top:.5rem">Values 0–1 (or 0–100; auto-normalized). Uses the Judge uAgent when JUDGE_ADDRESS is configured.</div>
     <div class="res" id="res"></div>
   </div>
 </div>
