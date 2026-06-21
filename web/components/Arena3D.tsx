@@ -400,10 +400,16 @@ export function Arena3D() {
             stance: ls.attacking ? "extended" : "stable",
           },
           deck,
-          range: Math.abs(ls.x - rs.x),
+          // The arena UI has no footwork/spacing mechanic — move buttons always
+          // connect — so the enemy fights from a fixed in-pocket range. Using the
+          // raw x-gap (~2.3) would read as permanently out of reach, leaving the
+          // executor stuck choosing "advance" (a no-op here) and never throwing.
+          range: 0.6,
         },
         rng,
       );
+      // "advance"/"wait" are footwork the UI can't express, so treat any
+      // committed move as the action and let other beats pass as spacing.
       if (action.kind === "move") {
         const am = usableMoves.find((m) => m.id === action.moveId) ?? usableMoves[0];
         if (am) playMoveRef.current?.("right", am);
