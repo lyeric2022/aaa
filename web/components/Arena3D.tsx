@@ -34,10 +34,21 @@ function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
 }
 
+function prettifyName(raw: string): string {
+  const cleaned = raw
+    .replace(/[_-]+/g, " ")
+    .replace(/\bsonic\b/gi, "")
+    .replace(/\buntitled project\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = cleaned || "Ghost Move";
+  return base.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function toArenaMove(record: MoveRecord): ArenaMove {
   return {
     id: record.move_card.id,
-    name: record.move_card.name,
+    name: prettifyName(record.move_card.name || record.move_card.id),
     speed: record.move_card.stats.speed,
     power: record.move_card.stats.power,
     balanceRisk: record.move_card.stats.balance_risk,
@@ -292,28 +303,30 @@ export function Arena3D() {
       });
   }, []);
 
-  const fallbackMoves = useMemo<ArenaMove[]>(
+  const arenaBasics = useMemo<ArenaMove[]>(
     () => [
-      {
-        id: "jab",
-        name: "Ghost Jab Combo",
-        speed: 67,
-        power: 13,
-        balanceRisk: 69,
-        recovery: 40,
-      },
-      {
-        id: "cross",
-        name: "Counter Cross",
-        speed: 58,
-        power: 18,
-        balanceRisk: 57,
-        recovery: 46,
-      },
+      { id: "basic_jab", name: "Quick Jab", speed: 72, power: 11, balanceRisk: 28, recovery: 64 },
+      { id: "basic_cross", name: "Counter Cross", speed: 54, power: 22, balanceRisk: 48, recovery: 50 },
+      { id: "basic_sweep", name: "Low Sweep", speed: 46, power: 17, balanceRisk: 62, recovery: 44 },
+      { id: "basic_guard", name: "Guard Break", speed: 38, power: 26, balanceRisk: 70, recovery: 36 },
     ],
     [],
   );
-  const usableMoves = moves.length ? moves : fallbackMoves;
+
+  // Always give each fighter a varied kit: the player's real scored moves
+  // first, then arena archetypes to fill out a 4-slot loadout.
+  const usableMoves = useMemo<ArenaMove[]>(() => {
+    const roster: ArenaMove[] = [];
+    const seen = new Set<string>();
+    for (const move of [...moves, ...arenaBasics]) {
+      const key = move.name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      roster.push(move);
+      if (roster.length >= 4) break;
+    }
+    return roster;
+  }, [moves, arenaBasics]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -453,6 +466,10 @@ export function Arena3D() {
   }, []);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
+    const ls = leftStateRef.current ?? left;
+    const rs = rightStateRef.current ?? right;
+    if (ls.hp <= 0 || rs.hp <= 0) return;
+
     const dmg = damageFor(move);
     const bal = balanceDamageFor(move);
     const knock = 0.18 + move.speed / 500;
@@ -568,8 +585,20 @@ export function Arena3D() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <MoveControls title="Player 1 moves" side="left" moves={usableMoves} onPlay={playMove} />
-        <MoveControls title="Player 2 moves" side="right" moves={usableMoves} onPlay={playMove} />
+        <MoveControls
+          title="Player 1 moves"
+          side="left"
+          moves={usableMoves}
+          onPlay={playMove}
+          disabled={!!winner}
+        />
+        <MoveControls
+          title="Player 2 moves"
+          side="right"
+          moves={usableMoves}
+          onPlay={playMove}
+          disabled={!!winner}
+        />
       </div>
 
       <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
@@ -631,11 +660,13 @@ function MoveControls({
   side,
   moves,
   onPlay,
+  disabled,
 }: {
   title: string;
   side: PlayerSide;
   moves: ArenaMove[];
   onPlay: (side: PlayerSide, move: ArenaMove) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
@@ -645,7 +676,8 @@ function MoveControls({
           <button
             key={`${side}-${move.id}`}
             onClick={() => onPlay(side, move)}
-            className="rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10"
+            disabled={disabled}
+            className="rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
           >
             <div className="font-medium">{move.name}</div>
             <div className="mt-1 text-xs text-[#8888a0]">
