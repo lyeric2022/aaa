@@ -51,8 +51,6 @@ export function VerificationPanel({ card }: { card: MoveCard }) {
     card.verification?.status === "not_run"
       ? "pending"
       : (card.verification?.status ?? "pending");
-  const plazaStatus = card.plaza_video_url ? "passed" : "pending";
-
   return (
     <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-6">
       <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
@@ -67,7 +65,7 @@ export function VerificationPanel({ card }: { card: MoveCard }) {
         </span>
       </div>
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Step
           label="Studio SONIC"
           status={card.studio_sonic_validated ? "passed" : "pending"}
@@ -82,11 +80,6 @@ export function VerificationPanel({ card }: { card: MoveCard }) {
           label="MuJoCo / GEAR"
           status={verificationStatus}
           detail={card.verification?.notes || "Attach official replay video"}
-        />
-        <Step
-          label="G1 Plaza"
-          status={plazaStatus}
-          detail={card.plaza_video_url ? "Hardware proof attached" : "Film Lower Sproul run"}
         />
       </div>
 

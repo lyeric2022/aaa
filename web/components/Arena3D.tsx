@@ -9,6 +9,7 @@ import type { MoveCard, MoveRecord } from "@/lib/types";
 import { getPersona, listPersonas, makePersonaController } from "@/lib/enemy/personas";
 import { makeRng } from "@/lib/enemy/rng";
 import type { FighterController } from "@/lib/enemy/types";
+import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
 
 type PlayerSide = "left" | "right";
 
@@ -36,10 +37,21 @@ function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
 }
 
+function prettifyName(raw: string): string {
+  const cleaned = raw
+    .replace(/[_-]+/g, " ")
+    .replace(/\bsonic\b/gi, "")
+    .replace(/\buntitled project\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = cleaned || "Ghost Move";
+  return base.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function toArenaMove(record: MoveRecord): ArenaMove {
   return {
     id: record.move_card.id,
-    name: record.move_card.name,
+    name: prettifyName(record.move_card.name || record.move_card.id),
     speed: record.move_card.stats.speed,
     power: record.move_card.stats.power,
     balanceRisk: record.move_card.stats.balance_risk,
@@ -267,11 +279,25 @@ export function Arena3D() {
   const [log, setLog] = useState<string[]>([
     "Choose a move. Each robot can play robot-skill cards like Street Fighter specials.",
   ]);
+  const [announcerOn, setAnnouncerOn] = useState(true);
+  const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
+  const koSpokenRef = useRef(false);
 
   useEffect(() => {
     leftStateRef.current = left;
     rightStateRef.current = right;
   }, [left, right]);
+
+  useEffect(() => {
+    announcer.setEnabled(announcerOn);
+  }, [announcerOn]);
+
+  useEffect(() => {
+    fetch("/api/tts")
+      .then((res) => res.json())
+      .then((data: { configured?: boolean }) => setAnnouncerReady(Boolean(data.configured)))
+      .catch(() => setAnnouncerReady(false));
+  }, []);
 
   useEffect(() => {
     fetch("/api/moves")
@@ -283,53 +309,59 @@ export function Arena3D() {
       });
   }, []);
 
-  const fallbackMoves = useMemo<ArenaMove[]>(
+  const arenaBasics = useMemo<ArenaMove[]>(
     () => [
-      {
-        id: "jab",
-        name: "Ghost Jab Combo",
-        speed: 67,
-        power: 13,
-        balanceRisk: 69,
-        recovery: 40,
-      },
-      {
-        id: "cross",
-        name: "Counter Cross",
-        speed: 58,
-        power: 18,
-        balanceRisk: 57,
-        recovery: 46,
-      },
+      { id: "basic_jab", name: "Quick Jab", speed: 72, power: 11, balanceRisk: 28, recovery: 64 },
+      { id: "basic_cross", name: "Counter Cross", speed: 54, power: 22, balanceRisk: 48, recovery: 50 },
+      { id: "basic_sweep", name: "Low Sweep", speed: 46, power: 17, balanceRisk: 62, recovery: 44 },
+      { id: "basic_guard", name: "Guard Break", speed: 38, power: 26, balanceRisk: 70, recovery: 36 },
     ],
     [],
   );
-  const usableMoves = moves.length ? moves : fallbackMoves;
 
-  // Full MoveCards for the enemy brain (it reads the SAME scored stats the
-  // scorer computes). Falls back to synthetic cards mirroring fallbackMoves.
+  // Always give each fighter a varied kit: the player's real scored moves
+  // first, then arena archetypes to fill out a 4-slot loadout.
+  const usableMoves = useMemo<ArenaMove[]>(() => {
+    const roster: ArenaMove[] = [];
+    const seen = new Set<string>();
+    for (const move of [...moves, ...arenaBasics]) {
+      const key = move.name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      roster.push(move);
+      if (roster.length >= 4) break;
+    }
+    return roster;
+  }, [moves, arenaBasics]);
+
+  // Full MoveCards for the enemy brain, aligned to the displayed roster (it
+  // reads the SAME scored stats the scorer computes). Real scored cards are
+  // reused; arena-basic fillers are synthesized from their ArenaMove.
   const usableDeck = useMemo<MoveCard[]>(() => {
-    if (deckCards.length) return deckCards;
-    return fallbackMoves.map((m) => ({
-      id: m.id,
-      name: m.name,
-      source: "sonic_zip" as const,
-      attack_type: "strike_combo",
-      studio_sonic_validated: false,
-      stats: {
-        speed: m.speed,
-        power: m.power,
-        smoothness: 80,
-        balance_risk: m.balanceRisk,
-        recovery: m.recovery,
-        deployability: 60,
-      },
-      verdict: "needs_edits" as const,
-      coach_feedback: "",
-      created_at: "1970-01-01T00:00:00.000Z",
-      pipeline: { data: "fallback", eval: "fallback", deploy: "fallback" },
-    }));
-  }, [deckCards, fallbackMoves]);
+    const byId = new Map(deckCards.map((c) => [c.id, c]));
+    return usableMoves.map(
+      (m): MoveCard =>
+        byId.get(m.id) ?? {
+          id: m.id,
+          name: m.name,
+          source: "sonic_zip",
+          attack_type: "strike_combo",
+          studio_sonic_validated: false,
+          stats: {
+            speed: m.speed,
+            power: m.power,
+            smoothness: 80,
+            balance_risk: m.balanceRisk,
+            recovery: m.recovery,
+            deployability: 60,
+          },
+          verdict: "needs_edits",
+          coach_feedback: "",
+          created_at: "1970-01-01T00:00:00.000Z",
+          pipeline: { data: "fallback", eval: "fallback", deploy: "fallback" },
+        },
+    );
+  }, [deckCards, usableMoves]);
 
   useEffect(() => {
     deckCardsRef.current = usableDeck;
@@ -518,6 +550,10 @@ export function Arena3D() {
   }, []);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
+    const ls = leftStateRef.current ?? left;
+    const rs = rightStateRef.current ?? right;
+    if (ls.hp <= 0 || rs.hp <= 0) return;
+
     const dmg = damageFor(move);
     const bal = balanceDamageFor(move);
     const knock = 0.18 + move.speed / 500;
@@ -544,20 +580,31 @@ export function Arena3D() {
       }));
     }
 
-    setLog((prev) => [
-      `${attackerName} plays ${move.name}: ${dmg} HP, ${bal} balance damage to ${defenderName}.`,
-      ...prev.slice(0, 4),
-    ]);
+    const line = battleCall(attackerName, defenderName, move, dmg);
+    setLog((prev) => [line, ...prev.slice(0, 4)]);
+    void announcer.speak(line);
   }
   playMoveRef.current = playMove;
 
   function reset() {
+    koSpokenRef.current = false;
     setLeft((p) => ({ ...p, hp: 100, balance: 100, x: -1.15, hitFlash: 0 }));
     setRight((p) => ({ ...p, hp: 100, balance: 100, x: 1.15, hitFlash: 0 }));
-    setLog(["Round reset. Pick a move for either robot."]);
+    const line = resetCall();
+    setLog([line]);
+    void announcer.speak(line);
   }
 
   const winner = left.hp <= 0 ? right.name : right.hp <= 0 ? left.name : null;
+
+  useEffect(() => {
+    if (!winner || koSpokenRef.current) return;
+    koSpokenRef.current = true;
+    const loser = winner === left.name ? right.name : left.name;
+    const line = koCall(winner, loser);
+    setLog((prev) => [line, ...prev.slice(0, 4)]);
+    void announcer.speak(line);
+  }, [winner, left.name, right.name]);
 
   return (
     <div className="space-y-5">
@@ -570,9 +617,14 @@ export function Arena3D() {
             <h1 className="text-2xl font-bold">3D robot-sports duel</h1>
             <p className="text-sm text-[#8888a0]">
               Two G1-inspired fighters face off using scored robot move cards.
+              {announcerReady === false && (
+                <span className="mt-1 block text-[#f5a623]">
+                  Deepgram voice off — add DEEPGRAM_API_KEY to web/.env.local
+                </span>
+              )}
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <label className="flex flex-col gap-1 text-xs text-[#8888a0]">
               <span className="uppercase tracking-[0.18em]">Player 2 AI</span>
               <select
@@ -588,6 +640,16 @@ export function Arena3D() {
                 ))}
               </select>
             </label>
+            <button
+              onClick={() => setAnnouncerOn((on) => !on)}
+              className={`self-end rounded-lg border px-4 py-2 text-sm transition ${
+                announcerOn
+                  ? "border-[#3dd68c]/50 bg-[#3dd68c]/10 text-[#3dd68c]"
+                  : "border-[#2a2a3d] text-[#8888a0] hover:border-[#7c5cff]"
+              }`}
+            >
+              {announcerOn ? "🔊 Announcer on" : "🔇 Announcer off"}
+            </button>
             <button
               onClick={reset}
               className="self-end rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
@@ -623,8 +685,20 @@ export function Arena3D() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <MoveControls title="Player 1 moves" side="left" moves={usableMoves} onPlay={playMove} />
-        <MoveControls title="Player 2 moves" side="right" moves={usableMoves} onPlay={playMove} />
+        <MoveControls
+          title="Player 1 moves"
+          side="left"
+          moves={usableMoves}
+          onPlay={playMove}
+          disabled={!!winner}
+        />
+        <MoveControls
+          title="Player 2 moves"
+          side="right"
+          moves={usableMoves}
+          onPlay={playMove}
+          disabled={!!winner}
+        />
       </div>
 
       <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
@@ -686,11 +760,13 @@ function MoveControls({
   side,
   moves,
   onPlay,
+  disabled,
 }: {
   title: string;
   side: PlayerSide;
   moves: ArenaMove[];
   onPlay: (side: PlayerSide, move: ArenaMove) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
@@ -700,7 +776,8 @@ function MoveControls({
           <button
             key={`${side}-${move.id}`}
             onClick={() => onPlay(side, move)}
-            className="rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10"
+            disabled={disabled}
+            className="rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
           >
             <div className="font-medium">{move.name}</div>
             <div className="mt-1 text-xs text-[#8888a0]">

@@ -1,6 +1,21 @@
 import type { MoveCard, MotionStats } from "@/lib/types";
 import { StatBar, VerdictBadge } from "@/components/StatBar";
 
+const STAT_INFO = {
+  speed:
+    "How fast the move peaks. Based on maximum joint angular velocity across all 29 joints. Higher = snappier execution.",
+  power:
+    "Sustained intensity through the move. Based on average joint velocity. Higher = more forceful, committed motion.",
+  smoothness:
+    "How clean the motion feels. Penalizes sharp acceleration spikes and jitter. Higher = smoother, less robotic stutter.",
+  balance_risk:
+    "Likelihood the G1 loses balance or over-extends. Combines joint extension, jerk, and end-of-motion instability. Lower is safer.",
+  recovery:
+    "How well the robot settles after the move. Measures stability in the final 10% of frames. Higher = cleaner return to neutral.",
+  deployability:
+    "Overall robot-readiness score. Weighted mix of smoothness, recovery, balance risk, and speed. Higher = more likely to run on hardware.",
+} as const;
+
 export function MoveCardView({
   card,
   motionStats,
@@ -19,12 +34,29 @@ export function MoveCardView({
         )}
       </div>
 
-      <StatBar label="Speed" value={card.stats.speed} />
-      <StatBar label="Power" value={card.stats.power} />
-      <StatBar label="Smoothness" value={card.stats.smoothness} />
-      <StatBar label="Balance Risk" value={card.stats.balance_risk} risk />
-      <StatBar label="Recovery" value={card.stats.recovery} />
-      <StatBar label="Deployability" value={card.stats.deployability} />
+      <StatBar label="Speed" value={card.stats.speed} info={STAT_INFO.speed} />
+      <StatBar label="Power" value={card.stats.power} info={STAT_INFO.power} />
+      <StatBar
+        label="Smoothness"
+        value={card.stats.smoothness}
+        info={STAT_INFO.smoothness}
+      />
+      <StatBar
+        label="Balance Risk"
+        value={card.stats.balance_risk}
+        risk
+        info={STAT_INFO.balance_risk}
+      />
+      <StatBar
+        label="Recovery"
+        value={card.stats.recovery}
+        info={STAT_INFO.recovery}
+      />
+      <StatBar
+        label="Deployability"
+        value={card.stats.deployability}
+        info={STAT_INFO.deployability}
+      />
 
       <div className="mt-4 p-4 bg-[#7c5cff]/10 border-l-2 border-[#7c5cff] rounded-r-lg text-sm leading-relaxed">
         <strong className="text-[#a78bfa]">Coach:</strong> {card.coach_feedback}
@@ -56,22 +88,6 @@ export function MoveCardView({
         />
       )}
 
-      {card.plaza_video_url ? (
-        <div className="mt-4">
-          <p className="text-xs uppercase tracking-wider text-[#3dd68c] mb-2">
-            Plaza proof — G1 deploy
-          </p>
-          <video
-            src={card.plaza_video_url}
-            controls
-            className="w-full rounded-lg border border-[#3dd68c]/30"
-          />
-        </div>
-      ) : (
-        <div className="mt-4 p-4 border border-dashed border-[#2a2a3d] rounded-lg text-sm text-[#8888a0]">
-          Plaza proof pending — upload G1 video after Lower Sproul deploy
-        </div>
-      )}
     </div>
   );
 }

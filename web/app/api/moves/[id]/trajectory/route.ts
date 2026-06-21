@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
+import { remapIsaacLabFrames } from "@/lib/g1Motion";
 import { getMove } from "@/lib/storage";
 
 function parseCsv(csv: string): number[][] {
@@ -34,8 +35,23 @@ async function findJointCsv(dir: string): Promise<string | null> {
 async function candidateJointPaths(id: string, sonicZipPath?: string) {
   const root = process.cwd();
   const repoRoot = path.join(root, "..");
-  const paths = [
+  const paths: string[] = [
+    path.join(
+      root,
+      "data",
+      "gear_sonic_reference",
+      "ghost_fighter",
+      "ghost_jab_combo_extracted",
+      "joint_pos.csv",
+    ),
     path.join(repoRoot, "assets", "motions", `${id}_extracted`, "joint_pos.csv"),
+    path.join(
+      repoRoot,
+      "assets",
+      "motions",
+      "ghost_jab_combo_extracted",
+      "joint_pos.csv",
+    ),
   ];
 
   if (sonicZipPath) {
@@ -44,7 +60,7 @@ async function candidateJointPaths(id: string, sonicZipPath?: string) {
     if (uploadedJointCsv) paths.unshift(uploadedJointCsv);
   }
 
-  return paths;
+  return [...new Set(paths)];
 }
 
 export async function GET(
@@ -62,7 +78,8 @@ export async function GET(
     try {
       const csv = await fs.readFile(jointPath, "utf8");
       const rawFrames = parseCsv(csv);
-      const frames = sampleFrames(rawFrames);
+      const mujocoFrames = remapIsaacLabFrames(rawFrames);
+      const frames = sampleFrames(mujocoFrames);
       const sourceFps = record.stats?.fps ?? 50;
       const durationSec =
         record.stats?.duration_sec ?? rawFrames.length / Math.max(sourceFps, 1);
@@ -73,7 +90,7 @@ export async function GET(
         duration_sec: durationSec,
         frames,
         source: jointPath,
-        joint_order: "G1 / SONIC 29-DOF IsaacLab order",
+        joint_order: "G1 29-DOF MuJoCo / Unitree SDK order",
       });
     } catch {
       // Try the next candidate path.
