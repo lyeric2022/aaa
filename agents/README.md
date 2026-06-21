@@ -47,7 +47,29 @@ Stats are floats in `[0, 1]` (values `> 1` are auto-divided by 100 so the
 repo's existing `move_cards/*.json` 0–100 cards also work):
 
 ```json
-{"name":"ghost_jab","stats":{"balance_risk":0.8,"smoothness":0.6,"recovery":0.2,"speed":0.7,"executability":0.5}}
+{"name":"ghost_jab","stats":{"balance_risk":0.8,"smoothness":0.6,"recovery":0.2,"speed":0.7}}
 ```
 
 Verdict shape: `{deployable: bool, score: float, failing_dims: [str], reasoning: str}`.
+
+## Web bridge (call the agent logic over HTTP)
+
+For the Next.js app to score a card without ASI:One, run the bridge:
+
+```bash
+uvicorn web_bridge:app --port 8010 --reload
+```
+
+Then from the frontend:
+
+```js
+const res = await fetch("http://localhost:8010/judge", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ name: card.id, stats: card.stats }),
+});
+const result = await res.json(); // { deployable, score, failing_dims, reasoning, coach_summary?, fixes? }
+```
+
+The bridge reuses the same `core.evaluate` (Judge → Coach) logic the agents use,
+so verdicts match the ASI:One chat path.

@@ -14,11 +14,18 @@ from __future__ import annotations
 
 from uagents import Model
 
+from core import STAT_KEYS  # re-exported; single source of truth lives in core
+
 COACH_PROTOCOL_NAME = "ghost-fighter-move-fix"
 COACH_PROTOCOL_VERSION = "1.0.0"
 
-# Move-card stat dimensions, all floats in [0, 1].
-STAT_KEYS = ["balance_risk", "smoothness", "recovery", "speed", "executability"]
+__all__ = [
+    "STAT_KEYS",
+    "COACH_PROTOCOL_NAME",
+    "COACH_PROTOCOL_VERSION",
+    "MoveFixRequest",
+    "MoveFixResponse",
+]
 
 
 class MoveFixRequest(Model):

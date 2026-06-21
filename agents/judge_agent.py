@@ -22,14 +22,12 @@ Output verdict shape:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
@@ -41,29 +39,19 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
+from core import build_verdict, judge_llm, normalize_stats
 from protocols import (
     COACH_PROTOCOL_NAME,
     COACH_PROTOCOL_VERSION,
-    STAT_KEYS,
     MoveFixRequest,
     MoveFixResponse,
 )
 
 load_dotenv()
 
-ASI_API_KEY = os.getenv("ASI_API_KEY")
 JUDGE_SEED = os.getenv("JUDGE_SEED", "ghost-fighter-judge-seed-change-me")
 JUDGE_PORT = int(os.getenv("JUDGE_PORT", "8001"))
 COACH_ADDRESS = os.getenv("COACH_ADDRESS", "")  # set to the Coach's agent1q... address
-ASI_MODEL = "asi1-mini"
-
-# Safety thresholds (hard gate) and soft thresholds (failing-dim detection).
-BALANCE_RISK_MAX = 0.7
-RECOVERY_MIN = 0.3
-SOFT_MIN = 0.5  # smoothness / executability floor
-SPEED_MIN = 0.2
-
-client = OpenAI(base_url="https://api.asi1.ai/v1", api_key=ASI_API_KEY)
 
 agent = Agent(
     name="ghost-fighter-judge",
@@ -72,104 +60,6 @@ agent = Agent(
     mailbox=True,
     publish_agent_details=True,
 )
-
-JUDGE_SYSTEM_PROMPT = (
-    "You are the deployability judge for a humanoid robot-sports platform. "
-    "Move-card stats are floats 0-1: balance_risk (higher is worse), smoothness, "
-    "recovery, speed, executability. Give a nuanced overall judgment of whether "
-    "the move is safe and clean enough to deploy to a real humanoid, plus a SHORT "
-    "human-readable explanation. "
-    "Respond with ONLY JSON: "
-    '{"deployable": <bool>, "score": <float 0-1>, "reasoning": "<2-3 sentences>"}.'
-)
-
-
-def normalize_stats(raw: dict) -> dict[str, float]:
-    """Coerce a stats dict to {key: float in [0,1]}. Accepts 0-100 scale inputs
-    (like the repo's existing move_cards/*.json) by auto-dividing by 100."""
-    out: dict[str, float] = {}
-    for k in STAT_KEYS:
-        v = raw.get(k)
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            continue
-        if f > 1.0:  # looks like a 0-100 value
-            f = f / 100.0
-        out[k] = max(0.0, min(1.0, f))
-    return out
-
-
-def safety_gate(stats: dict[str, float]) -> list[str]:
-    """Return the HARD safety failures. Non-overridable by the LLM."""
-    failures = []
-    if stats.get("balance_risk", 0.0) > BALANCE_RISK_MAX:
-        failures.append("balance_risk")
-    if stats.get("recovery", 1.0) < RECOVERY_MIN:
-        failures.append("recovery")
-    return failures
-
-
-def soft_failing_dims(stats: dict[str, float]) -> list[str]:
-    """Threshold-based detection of weaker (non-safety-critical) dimensions."""
-    fails = []
-    if stats.get("smoothness", 1.0) < SOFT_MIN:
-        fails.append("smoothness")
-    if stats.get("executability", 1.0) < SOFT_MIN:
-        fails.append("executability")
-    if stats.get("speed", 1.0) < SPEED_MIN:
-        fails.append("speed")
-    return fails
-
-
-async def judge_llm(stats: dict[str, float]) -> tuple[bool, float, str]:
-    """Nuanced judgment from ASI:One. Falls back to a deterministic estimate on
-    any error so the agent stays runnable during a demo."""
-    try:
-        resp = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=ASI_MODEL,
-            messages=[
-                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps({"stats": stats})},
-            ],
-            temperature=0.2,
-        )
-        raw = resp.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1].lstrip("json").strip()
-        data = json.loads(raw)
-        return bool(data["deployable"]), float(data["score"]), str(data["reasoning"])
-    except Exception as exc:  # noqa: BLE001 - demo resilience
-        # Deterministic fallback score: reward good dims, punish balance_risk.
-        good = [stats.get(k, 0.5) for k in ("smoothness", "recovery", "speed", "executability")]
-        score = max(0.0, min(1.0, sum(good) / len(good) - stats.get("balance_risk", 0.5) * 0.5))
-        return score >= 0.6, round(score, 3), f"(LLM unavailable: {exc}) Heuristic score used."
-
-
-def build_verdict(stats: dict[str, float], llm_deployable: bool, llm_score: float, reasoning: str):
-    """Combine the safety gate with the LLM judgment. Safety failures force a
-    non-deployable verdict and cap the score."""
-    hard = safety_gate(stats)
-    soft = soft_failing_dims(stats)
-    failing_dims = list(dict.fromkeys(hard + soft))  # dedupe, keep order
-
-    if hard:
-        deployable = False
-        score = min(llm_score, 0.25)
-        reasoning = f"SAFETY GATE failed on {', '.join(hard)} (non-overridable). " + reasoning
-    else:
-        deployable = llm_deployable and not failing_dims
-        score = llm_score
-
-    return {
-        "deployable": deployable,
-        "score": round(float(score), 3),
-        "failing_dims": failing_dims,
-        "reasoning": reasoning,
-    }
 
 
 def parse_move_card(text: str) -> tuple[str, dict[str, float]] | None:
@@ -248,9 +138,9 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
             sender,
             _chat(
                 "Send a move card as JSON with stats (balance_risk, smoothness, "
-                "recovery, speed, executability) as floats 0-1, e.g. "
+                "recovery, speed) as floats 0-1, e.g. "
                 '{"name":"ghost_jab","stats":{"balance_risk":0.8,"smoothness":0.6,'
-                '"recovery":0.2,"speed":0.7,"executability":0.5}}',
+                '"recovery":0.2,"speed":0.7}}',
                 end=True,
             ),
         )
