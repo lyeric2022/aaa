@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -272,7 +273,14 @@ function recoveryMsFor(move: ArenaMove) {
 // Below this you're too winded to act and must rest (visible breather windows).
 const MIN_STAMINA_TO_ACT = 30;
 
+function parsePlayerSide(raw: string | null): PlayerSide {
+  return raw === "2" || raw === "right" ? "right" : "left";
+}
+
 export function Arena3D() {
+  const searchParams = useSearchParams();
+  const playerSide = parsePlayerSide(searchParams.get("player"));
+  const playerNumber = playerSide === "left" ? 1 : 2;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
   const rightRobot = useRef<THREE.Group | null>(null);
@@ -730,7 +738,16 @@ export function Arena3D() {
             </p>
             <h1 className="text-2xl font-bold">3D robot-sports duel</h1>
             <p className="text-sm text-[#8888a0]">
-              Two G1-inspired fighters face off using scored robot move cards.
+              Two G1-inspired fighters face off using scored robot move cards. You are Player{" "}
+              {playerNumber}.
+              {playerSide === "left" && !personaId && (
+                <span className="mt-1 block">
+                  Share the Player 2 link:{" "}
+                  <code className="rounded bg-black/30 px-1.5 py-0.5 text-[#3dd68c]">
+                    /arena?player=2
+                  </code>
+                </span>
+              )}
               {announcerReady === false && (
                 <span className="mt-1 block text-[#f5a623]">
                   Deepgram voice off — add DEEPGRAM_API_KEY to web/.env.local
@@ -818,22 +835,17 @@ export function Arena3D() {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <MoveControls
-          title="Player 1 moves"
-          side="left"
-          moves={usableMoves}
-          onPlay={playMove}
-          disabled={!!winner || leftBusy}
-        />
-        <MoveControls
-          title={rightIsAI ? `Player 2 moves (${right.name} AI)` : "Player 2 moves"}
-          side="right"
-          moves={usableMoves}
-          onPlay={playMove}
-          disabled={!!winner || rightBusy}
-        />
-      </div>
+      <MoveControls
+        title={
+          playerSide === "right" && rightIsAI
+            ? `Player ${playerNumber} moves (${right.name} AI)`
+            : `Player ${playerNumber} moves`
+        }
+        side={playerSide}
+        moves={usableMoves}
+        onPlay={playMove}
+        disabled={!!winner || (playerSide === "left" ? leftBusy : rightBusy)}
+      />
 
       <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
         <p className="mb-3 text-xs uppercase tracking-[0.18em] text-[#8888a0]">
