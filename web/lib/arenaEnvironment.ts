@@ -236,6 +236,7 @@ export function applyRopeContacts(
       if (rope.dirty) {
         arr.set(rope.rest);
         attr.needsUpdate = true;
+        rope.mesh.geometry.computeVertexNormals();
         rope.dirty = false;
       }
       continue;
@@ -253,6 +254,7 @@ export function applyRopeContacts(
       arr[i + bulgeIdx] = rope.rest[i + bulgeIdx] + rope.outwardSign * ROPE_MAX_BULGE * weight;
     }
     attr.needsUpdate = true;
+    rope.mesh.geometry.computeVertexNormals();
     rope.dirty = true;
   }
 }

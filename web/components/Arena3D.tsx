@@ -19,6 +19,7 @@ import {
   RING_HALF_X,
   RING_HALF_Z,
 } from "@/lib/arenaEnvironment";
+import { effectiveReach } from "@/lib/arena-physics";
 
 type PlayerSide = "left" | "right";
 
@@ -473,9 +474,6 @@ const MOVE_SPEED = 2.3; // walking speed in metres/sec
 const BOUND_X = RING_HALF_X - 0.18;
 const BOUND_Z = RING_HALF_Z - 0.18;
 const MIN_GAP = 0.9; // closest the two bodies can get (no overlap)
-// A committed strike lunges forward, so its effective reach is a bit longer
-// than the standing pose. This keeps the pocket generous enough to fight in.
-const LUNGE_REACH = 0.5;
 // How fast a fighter can rotate to face the opponent (fraction/40ms tick). A
 // finite turn rate is what lets circling/flanking pull you out of their cone.
 const TURN_RATE = 0.22;
@@ -485,10 +483,10 @@ const HIT_CONE_COS = 0.57;
 // Walk-cycle stride frequency (radians/sec at full speed).
 const STRIDE_FREQ = 9;
 
-// How far a move can connect, mirroring the enemy brain's movePhysics().range
-// so the AI and the player share one notion of "in range".
+// How far a move can connect — delegates to movePhysics().range so the arena
+// hit check and the enemy brain share one notion of "in range".
 function reachFor(move: ArenaMove) {
-  return 0.6 + move.speed * 0.012 + move.power * 0.004 + LUNGE_REACH;
+  return effectiveReach(move.speed, move.power);
 }
 
 // Keep a position inside the rectangular rope ring.
@@ -595,6 +593,18 @@ export function Arena3D() {
     const onDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
       if (!tracked.has(key)) return;
+      // Don't hijack keys while an input/select/textarea/contenteditable is
+      // focused (e.g. changing the Player 2 AI dropdown with arrow keys).
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "SELECT" ||
+        tag === "TEXTAREA" ||
+        el?.isContentEditable
+      ) {
+        return;
+      }
       // Stop the arrow keys from scrolling the page while fighting.
       if (key.startsWith("arrow")) e.preventDefault();
       keysRef.current.add(key);
@@ -842,10 +852,15 @@ export function Arena3D() {
       const fwdX = Math.cos(bot.rotation.y);
       const fwdZ = -Math.sin(bot.rotation.y);
 
-      // Lunge forward along the current facing during a strike.
+      // Lunge forward along the current facing during a strike, clamped to the
+      // ring so the visual body never crosses the ropes even at peak lunge.
       const lunge = progress * (1 - progress) * 1.5;
-      const targetX = state.x + fwdX * lunge;
-      const targetZ = state.z + fwdZ * lunge;
+      const [targetX, targetZ] = clampToBox(
+        state.x + fwdX * lunge,
+        state.z + fwdZ * lunge,
+        BOUND_X,
+        BOUND_Z,
+      );
       bot.position.x = THREE.MathUtils.lerp(bot.position.x, targetX, 0.3);
       bot.position.z = THREE.MathUtils.lerp(bot.position.z, targetZ, 0.3);
 
