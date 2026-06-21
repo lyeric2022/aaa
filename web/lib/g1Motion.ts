@@ -68,3 +68,14 @@ export function remapLafanJointRow(row: number[]): number[] {
   // Lafan G1 CSV joint columns are already MuJoCo/SDK order.
   return row.slice(7);
 }
+
+/** Drive a G1 URDF from one remapped MuJoCo joint frame. */
+export function applyG1JointFrame(
+  setJointValue: (jointName: string, value: number) => void,
+  frame: number[],
+) {
+  G1_MUJOCO_JOINT_NAMES.forEach((jointName, index) => {
+    const value = frame[index];
+    if (Number.isFinite(value)) setJointValue(jointName, value);
+  });
+}

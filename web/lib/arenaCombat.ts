@@ -19,11 +19,19 @@ export type FighterState = {
   x: number;
   attacking: boolean;
   attackSide: PlayerSide | null;
+  /** Which move card is playing (drives per-move arena animation). */
+  attackMoveId: string | null;
   attackStart: number;
   hitFlash: number;
   recoverUntil: number;
   stance: "stable" | "recovering" | "knockdown";
 };
+
+/** Arena animation length — block uses full SONIC clip duration. */
+export function attackAnimMs(attackMoveId: string | null): number {
+  if (attackMoveId === "block") return 1940;
+  return 520;
+}
 
 export const MIN_STAMINA_TO_ACT = 30;
 
@@ -63,6 +71,7 @@ export function createFighter(name: string, x: number): FighterState {
     x,
     attacking: false,
     attackSide: null,
+    attackMoveId: null,
     attackStart: 0,
     hitFlash: 0,
     recoverUntil: 0,
@@ -72,11 +81,14 @@ export function createFighter(name: string, x: number): FighterState {
 
 export function decayFighter(p: FighterState, now: number): FighterState {
   const recovering = now < p.recoverUntil;
+  const animMs = attackAnimMs(p.attackMoveId);
+  const inAnim = now - p.attackStart < animMs;
   return {
     ...p,
     hitFlash: Math.max(0, p.hitFlash - 0.08),
-    attacking: p.attacking && now - p.attackStart < 520,
-    attackSide: now - p.attackStart < 520 ? p.attackSide : null,
+    attacking: p.attacking && inAnim,
+    attackSide: inAnim ? p.attackSide : null,
+    attackMoveId: inAnim ? p.attackMoveId : null,
     stamina: clamp(p.stamina + (recovering ? 0.4 : 1.0)),
     balance: clamp(p.balance + (recovering ? 0.4 : 1.1)),
     stance: recovering ? p.stance : "stable",
@@ -127,6 +139,7 @@ export function applyMove(
     ...attacker,
     attacking: true,
     attackSide: side,
+    attackMoveId: move.id,
     attackStart: now,
     stamina: clamp(attacker.stamina - cost),
     recoverUntil: now + recoverMs,

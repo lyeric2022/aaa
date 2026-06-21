@@ -14,6 +14,7 @@ import { announcer, koCall, resetCall } from "@/lib/announcer";
 import {
   ARENA_BASICS,
   applyMove,
+  attackAnimMs,
   createFighter,
   decayFighter,
   MIN_STAMINA_TO_ACT,
@@ -22,6 +23,7 @@ import {
   type FighterState,
   type PlayerSide,
 } from "@/lib/arenaCombat";
+import { applyG1JointFrame } from "@/lib/g1Motion";
 import { applyCameraFrame } from "@/lib/cameraFrame";
 import { useCameraDebug } from "@/lib/useCameraDebug";
 import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
@@ -187,15 +189,35 @@ function makeRobot(accent: string) {
   return robot;
 }
 
+function attackProgressFor(state: FighterState): number {
+  if (!state.attackSide) return 0;
+  const duration = attackAnimMs(state.attackMoveId);
+  return Math.min(1, (Date.now() - state.attackStart) / duration);
+}
+
 function setRobotPose(
   robot: THREE.Group,
   side: PlayerSide,
   attackProgress: number,
   hitFlash: number,
+  attackMoveId: string | null,
+  blockFrames: number[][] | null,
 ) {
   const direction = side === "left" ? 1 : -1;
   robot.rotation.y = side === "left" ? 0 : Math.PI;
   robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
+
+  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
+  if (attackMoveId === "block" && blockFrames?.length && urdf?.setJointValue) {
+    const frameIdx = Math.min(
+      blockFrames.length - 1,
+      Math.floor(attackProgress * blockFrames.length),
+    );
+    applyG1JointFrame(urdf.setJointValue.bind(urdf), blockFrames[frameIdx]!);
+    robot.scale.setScalar(1);
+    setPlaceholderVisible(robot, false);
+    return;
+  }
 
   const rightUpper = robot.getObjectByName("rightUpperArm");
   const rightFore = robot.getObjectByName("rightForearm");
@@ -205,7 +227,6 @@ function setRobotPose(
 
   const punch = Math.sin(Math.min(1, attackProgress) * Math.PI);
   robot.scale.setScalar(1 + punch * 0.04);
-  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
   if (urdf?.setJointValue) {
     const reach = punch * (side === "left" ? -1 : 1);
     urdf.setJointValue("right_shoulder_pitch_joint", -0.45 - punch * 1.15);
@@ -250,8 +271,6 @@ export function Arena3D() {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
   const rightRobot = useRef<THREE.Group | null>(null);
-  const leftImpactRef = useRef<THREE.Mesh | null>(null);
-  const rightImpactRef = useRef<THREE.Mesh | null>(null);
   const leftStateRef = useRef<FighterState | null>(null);
   const rightStateRef = useRef<FighterState | null>(null);
   const deckCardsRef = useRef<MoveCard[]>([]);
@@ -266,8 +285,18 @@ export function Arena3D() {
   const [announcerOn, setAnnouncerOn] = useState(true);
   const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
   const koSpokenRef = useRef(false);
+  const blockTrajectoryRef = useRef<number[][] | null>(null);
   const { frame: cameraFrame, defaultFrame: cameraDefault, syncFromScene, resetToDefault } =
     useCameraDebug("arena");
+
+  useEffect(() => {
+    fetch("/api/moves/block/trajectory")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { frames?: number[][] } | null) => {
+        if (data?.frames?.length) blockTrajectoryRef.current = data.frames;
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     leftStateRef.current = left;
@@ -316,19 +345,10 @@ export function Arena3D() {
       });
   }, []);
 
-  // Always give each fighter a varied kit: the player's real scored moves
-  // first, then arena archetypes to fill out a 4-slot loadout.
+  // Real scored moves only — no synthetic filler once motions are loaded.
   const usableMoves = useMemo<ArenaMove[]>(() => {
-    const roster: ArenaMove[] = [];
-    const seen = new Set<string>();
-    for (const move of [...moves, ...ARENA_BASICS]) {
-      const key = move.name.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      roster.push(move);
-      if (roster.length >= 4) break;
-    }
-    return roster;
+    if (moves.length > 0) return moves.slice(0, 4);
+    return ARENA_BASICS.slice(0, 4);
   }, [moves]);
 
   // Full MoveCards for the enemy brain, aligned to the displayed roster (it
@@ -478,15 +498,6 @@ export function Arena3D() {
     leftRobot.current = leftBot;
     rightRobot.current = rightBot;
 
-    const impactGeo = new THREE.SphereGeometry(0.12, 20, 20);
-    const leftImpact = new THREE.Mesh(impactGeo, createMaterial("#3dd68c", "#3dd68c"));
-    const rightImpact = new THREE.Mesh(impactGeo, createMaterial("#ff5c5c", "#ff5c5c"));
-    leftImpact.visible = false;
-    rightImpact.visible = false;
-    scene.add(leftImpact, rightImpact);
-    leftImpactRef.current = leftImpact;
-    rightImpactRef.current = rightImpact;
-
     let raf = 0;
     const clock = new THREE.Clock();
     const loop = () => {
@@ -494,34 +505,41 @@ export function Arena3D() {
       const t = clock.getElapsedTime();
       const leftState = leftStateRef.current ?? left;
       const rightState = rightStateRef.current ?? right;
+      const blockFrames = blockTrajectoryRef.current;
       const leftProgress =
-        leftState.attackSide === "left"
-          ? Math.min(1, (Date.now() - leftState.attackStart) / 520)
-          : 0;
+        leftState.attackSide === "left" ? attackProgressFor(leftState) : 0;
       const rightProgress =
-        rightState.attackSide === "right"
-          ? Math.min(1, (Date.now() - rightState.attackStart) / 520)
-          : 0;
+        rightState.attackSide === "right" ? attackProgressFor(rightState) : 0;
 
-      const leftLunge = leftProgress * (1 - leftProgress) * 1.5;
-      const rightLunge = rightProgress * (1 - rightProgress) * 1.5;
+      const leftLunge =
+        leftState.attackMoveId === "block"
+          ? 0
+          : leftProgress * (1 - leftProgress) * 1.5;
+      const rightLunge =
+        rightState.attackMoveId === "block"
+          ? 0
+          : rightProgress * (1 - rightProgress) * 1.5;
       leftBot.position.x = THREE.MathUtils.lerp(leftBot.position.x, leftState.x + leftLunge, 0.28);
       rightBot.position.x = THREE.MathUtils.lerp(rightBot.position.x, rightState.x - rightLunge, 0.28);
       leftBot.position.z = Math.sin(t * 2.2) * 0.015;
       rightBot.position.z = -Math.sin(t * 2.1) * 0.015;
-      setRobotPose(leftBot, "left", leftProgress, leftState.hitFlash);
-      setRobotPose(rightBot, "right", rightProgress, rightState.hitFlash);
+      setRobotPose(
+        leftBot,
+        "left",
+        leftProgress,
+        leftState.hitFlash,
+        leftState.attackMoveId,
+        blockFrames,
+      );
+      setRobotPose(
+        rightBot,
+        "right",
+        rightProgress,
+        rightState.hitFlash,
+        rightState.attackMoveId,
+        blockFrames,
+      );
 
-      if (leftImpact) {
-        leftImpact.visible = leftProgress > 0.2 && leftProgress < 0.82;
-        leftImpact.position.set(leftBot.position.x + 0.78, 1.35, 0);
-        leftImpact.scale.setScalar(0.6 + leftProgress * 2.2);
-      }
-      if (rightImpact) {
-        rightImpact.visible = rightProgress > 0.2 && rightProgress < 0.82;
-        rightImpact.position.set(rightBot.position.x - 0.78, 1.35, 0);
-        rightImpact.scale.setScalar(0.6 + rightProgress * 2.2);
-      }
       controls.update();
       syncFromScene(camera, controls);
       renderer.render(scene, camera);

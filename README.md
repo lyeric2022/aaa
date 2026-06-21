@@ -137,6 +137,8 @@ move_cards/ghost_jab_combo.json
 
 - `assets/motions/ghost_jab_combo_sonic.zip` — Studio SONIC export for G1 deploy
 - `assets/motions/ghost_jab_combo_extracted/` — extracted SONIC CSVs
+- `assets/motions/block_sonic.zip` — defensive block SONIC export
+- `assets/motions/block_extracted/` — extracted block motion CSVs
 - `web/public/models/unitree_g1/` — MuJoCo Menagerie Unitree G1 reference assets
 - `web/public/models/g1_description/` — Unitree ROS G1 URDF + meshes for browser rendering
 - `scripts/verify_with_gear_sonic.sh` — prepares the motion folder for official GEAR-SONIC/MuJoCo verification
