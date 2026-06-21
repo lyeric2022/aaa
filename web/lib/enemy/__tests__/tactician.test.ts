@@ -32,8 +32,8 @@ describe("tactician", () => {
   });
 
   it("prefers an in-range move over an out-of-range one", () => {
-    // At range 1.6 the haymaker (short reach) cannot land; the poke can.
-    const o = obs({ deck: [POKE, HAYMAKER], range: 1.6 });
+    // At range 1.9 the haymaker (short reach) cannot land; the poke can.
+    const o = obs({ deck: [POKE, HAYMAKER], range: 1.9 });
     const chosen = chooseMove(o, "pressure", PRESSURE_BIAS, CLEAN, makeRng(7));
     expect(chosen?.move.id).toBe("poke");
     expect(chosen?.inRange).toBe(true);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { getRoomSnapshot, resetRoom, submitMove } from "@/lib/arenaRoomStore";
-import type { ArenaMove } from "@/lib/arenaCombat";
+import { getRoomSnapshot, resetRoom, setRoomInput, submitMove } from "@/lib/arenaRoomStore";
+import type { ArenaMove, FootInput } from "@/lib/arenaCombat";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -18,11 +18,23 @@ export async function POST(req: Request, context: RouteContext) {
     return NextResponse.json({ error: "Missing arena token" }, { status: 401 });
   }
 
-  const body = (await req.json()) as { action?: string; move?: ArenaMove };
+  const body = (await req.json()) as {
+    action?: string;
+    move?: ArenaMove;
+    input?: FootInput;
+  };
   if (body.action === "reset") {
     const result = resetRoom(id, token);
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
     return NextResponse.json(result.snapshot);
+  }
+
+  if (body.action === "input") {
+    const input = body.input ?? { fwd: 0, strafe: 0 };
+    const result = setRoomInput(id, token, input);
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
+    // Footwork is streamed via SSE; ack only to keep the request cheap.
+    return NextResponse.json({ ok: true });
   }
 
   if (!body.move?.id) {

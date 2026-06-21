@@ -13,25 +13,38 @@ import type { FighterController } from "@/lib/enemy/types";
 import { announcer, koCall, resetCall } from "@/lib/announcer";
 import {
   ARENA_BASICS,
+  advanceFooting,
+  angleLerp,
   applyMove,
   attackAnimMs,
+  BOUND_X,
+  BOUND_Z,
+  clampToBox,
   createFighter,
   decayFighter,
   MIN_STAMINA_TO_ACT,
+  MOVE_SPEED,
   staminaCostFor,
+  animForStats,
   type ArenaMove,
   type FighterState,
+  type FootInput,
+  type MoveAnim,
   type PlayerSide,
 } from "@/lib/arenaCombat";
 import { applyG1JointFrame } from "@/lib/g1Motion";
 import { applyCameraFrame, CAMERA_DEFAULTS } from "@/lib/cameraFrame";
 import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
-import { addArenaBackground } from "@/lib/arenaEnvironment";
+import { addArenaBackground, applyRopeContacts } from "@/lib/arenaEnvironment";
 
 const ARENA_CAMERA_DEFAULT = CAMERA_DEFAULTS.arena;
 
 function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
+}
+
+function parsePlayerSide(raw: string | null): PlayerSide {
+  return raw === "2" || raw === "right" ? "right" : "left";
 }
 
 function prettifyName(raw: string): string {
@@ -46,13 +59,15 @@ function prettifyName(raw: string): string {
 }
 
 function toArenaMove(record: MoveRecord): ArenaMove {
+  const { speed, power, balance_risk: balanceRisk, recovery } = record.move_card.stats;
   return {
     id: record.move_card.id,
     name: prettifyName(record.move_card.name || record.move_card.id),
-    speed: record.move_card.stats.speed,
-    power: record.move_card.stats.power,
-    balanceRisk: record.move_card.stats.balance_risk,
-    recovery: record.move_card.stats.recovery,
+    speed,
+    power,
+    balanceRisk,
+    recovery,
+    anim: animForStats(speed, power, balanceRisk),
   };
 }
 
@@ -189,6 +204,152 @@ function makeRobot(accent: string) {
   return robot;
 }
 
+// Joints the pose system writes. Every frame resets these to a neutral guard
+// first, so switching between archetypes never leaves a limb stuck mid-swing.
+const POSE_JOINTS = [
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "waist_yaw_joint",
+  "waist_pitch_joint",
+  "waist_roll_joint",
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_knee_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_knee_joint",
+] as const;
+
+type JointMap = Partial<Record<(typeof POSE_JOINTS)[number], number>>;
+
+// A relaxed fighting guard: hands up, slight knee bend. Idle robots and the
+// start/end of every attack settle here.
+const NEUTRAL_GUARD: JointMap = {
+  left_shoulder_pitch_joint: -0.22,
+  left_shoulder_roll_joint: 0.18,
+  left_elbow_joint: 1.05,
+  right_shoulder_pitch_joint: -0.22,
+  right_shoulder_roll_joint: -0.18,
+  right_elbow_joint: 1.05,
+  waist_pitch_joint: 0.06,
+  left_knee_joint: 0.08,
+  right_knee_joint: 0.08,
+};
+
+// Per-archetype joint targets at the peak of the swing (envelope = 1). Each
+// touches a different mix of joints so the moves read as visually distinct.
+// `dir` is +1 for the left-side fighter and -1 for the right so rotations
+// mirror correctly.
+function poseTargets(anim: MoveAnim, dir: number): JointMap {
+  switch (anim) {
+    // Snappy lead-hand straight: left arm fires forward, body stays square.
+    case "jab":
+      return {
+        left_shoulder_pitch_joint: -1.55,
+        left_shoulder_roll_joint: 0.05,
+        left_elbow_joint: 0.12,
+        right_shoulder_pitch_joint: -0.25,
+        right_elbow_joint: 1.2,
+        waist_yaw_joint: 0.14 * dir,
+      };
+    // Heavy rear-hand cross: huge torso rotation drives the right arm through.
+    case "cross":
+      return {
+        right_shoulder_pitch_joint: -1.5,
+        right_shoulder_roll_joint: -0.3 * dir,
+        right_elbow_joint: 0.15,
+        left_shoulder_pitch_joint: 0.15,
+        left_elbow_joint: 1.3,
+        waist_yaw_joint: 0.55 * dir,
+        waist_pitch_joint: 0.18,
+      };
+    // Wide horizontal hook: arm swings across with a roll-out and waist turn.
+    case "hook":
+      return {
+        right_shoulder_pitch_joint: -0.9,
+        right_shoulder_roll_joint: -1.15 * dir,
+        right_shoulder_yaw_joint: 0.6 * dir,
+        right_elbow_joint: 1.45,
+        left_shoulder_pitch_joint: -0.1,
+        left_elbow_joint: 1.1,
+        waist_yaw_joint: 0.42 * dir,
+        waist_roll_joint: 0.12 * dir,
+      };
+    // Rising uppercut: dip then drive up from the legs, right fist comes up.
+    case "uppercut":
+      return {
+        right_shoulder_pitch_joint: 0.55,
+        right_shoulder_roll_joint: -0.15 * dir,
+        right_elbow_joint: 1.95,
+        left_shoulder_pitch_joint: -0.3,
+        left_elbow_joint: 1.2,
+        waist_yaw_joint: 0.3 * dir,
+        waist_pitch_joint: -0.28,
+        left_knee_joint: 0.55,
+        right_knee_joint: 0.55,
+      };
+    // Low spinning sweep: deep crouch, lead leg sweeps out, arms counterbalance.
+    case "sweep":
+      return {
+        waist_pitch_joint: 0.5,
+        waist_yaw_joint: 0.45 * dir,
+        left_hip_pitch_joint: -0.2,
+        left_knee_joint: 1.35,
+        right_hip_pitch_joint: -0.5,
+        right_hip_roll_joint: -0.7 * dir,
+        right_knee_joint: 0.25,
+        left_shoulder_pitch_joint: -0.6,
+        left_shoulder_roll_joint: 0.9,
+        right_shoulder_pitch_joint: -0.6,
+        right_shoulder_roll_joint: -0.9,
+      };
+    // Two-handed overhead guard break: both arms rise high then smash down.
+    case "guard":
+      return {
+        left_shoulder_pitch_joint: -2.6,
+        left_shoulder_roll_joint: 0.25,
+        left_elbow_joint: 0.45,
+        right_shoulder_pitch_joint: -2.6,
+        right_shoulder_roll_joint: -0.25,
+        right_elbow_joint: 0.45,
+        waist_pitch_joint: 0.22,
+        left_knee_joint: 0.4,
+        right_knee_joint: 0.4,
+      };
+  }
+}
+
+// Vertical crouch offset (metres) applied to the whole robot at peak swing, so
+// low moves visibly drop the body rather than only bending joints.
+function crouchDepth(anim: MoveAnim): number {
+  if (anim === "sweep") return 0.32;
+  if (anim === "uppercut") return 0.14;
+  if (anim === "guard") return 0.1;
+  return 0;
+}
+
+// Additive walk-cycle joint offsets at a given phase: hips and the opposite
+// arms swing out of phase, knees bend on the trailing leg — enough to read as a
+// natural stride. Scaled by intensity at the call site.
+function strideOffsets(phase: number): JointMap {
+  const s = Math.sin(phase);
+  return {
+    left_hip_pitch_joint: 0.55 * s,
+    right_hip_pitch_joint: -0.55 * s,
+    left_knee_joint: 0.4 * Math.max(0, -s),
+    right_knee_joint: 0.4 * Math.max(0, s),
+    left_shoulder_pitch_joint: -0.4 * s,
+    right_shoulder_pitch_joint: 0.4 * s,
+    waist_roll_joint: 0.05 * s,
+  };
+}
+
 function attackProgressFor(state: FighterState): number {
   if (!state.attackSide) return 0;
   const duration = attackAnimMs(state.attackMoveId);
@@ -197,16 +358,14 @@ function attackProgressFor(state: FighterState): number {
 
 function setRobotPose(
   robot: THREE.Group,
-  side: PlayerSide,
   attackProgress: number,
   hitFlash: number,
+  anim: MoveAnim | null,
+  walkPhase: number,
+  walkIntensity: number,
   attackMoveId: string | null,
   blockFrames: number[][] | null,
 ) {
-  const direction = side === "left" ? 1 : -1;
-  robot.rotation.y = side === "left" ? 0 : Math.PI;
-  robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
-
   const urdf = robot.userData.urdf as URDFRobotLike | undefined;
   if (attackMoveId === "block" && blockFrames?.length && urdf?.setJointValue) {
     const frameIdx = Math.min(
@@ -214,46 +373,65 @@ function setRobotPose(
       Math.floor(attackProgress * blockFrames.length),
     );
     applyG1JointFrame(urdf.setJointValue.bind(urdf), blockFrames[frameIdx]!);
+    robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
     robot.scale.setScalar(1);
     setPlaceholderVisible(robot, false);
     return;
   }
 
+  const punch = anim ? Math.sin(Math.min(1, attackProgress) * Math.PI) : 0;
+  // Walking is suppressed while a strike is at full extension so the swing
+  // reads cleanly, then blends back in as the fighter returns to neutral.
+  const stride = walkIntensity * (1 - punch);
+
+  const flashBob = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
+  const crouch = anim ? crouchDepth(anim) * punch : 0;
+  const bob = stride > 0.001 ? Math.abs(Math.sin(walkPhase)) * 0.03 * stride : 0;
+  robot.position.y = flashBob - crouch + bob;
+  robot.scale.setScalar(1 + punch * 0.04);
+
+  if (urdf?.setJointValue) {
+    // Both fighters now rotate to face their opponent, so the pose is authored
+    // once in the local frame (forward = local +x) with no left/right mirror.
+    const targets = anim ? poseTargets(anim, 1) : null;
+    const walk = stride > 0.001 ? strideOffsets(walkPhase) : null;
+    // Blend neutral guard -> archetype peak by the swing envelope, then add the
+    // scaled walk stride on top. Joints not named by an archetype fall back to
+    // neutral, keeping the rest of the body stable instead of snapping to zero.
+    for (const joint of POSE_JOINTS) {
+      const base = NEUTRAL_GUARD[joint] ?? 0;
+      const peak = targets?.[joint] ?? base;
+      const walkAdd = walk ? (walk[joint] ?? 0) * stride : 0;
+      urdf.setJointValue(joint, base + (peak - base) * punch + walkAdd);
+    }
+  }
+
+  // Placeholder primitive limbs (only visible if the URDF fails to load) keep a
+  // generic punch so the fallback robot still reacts.
   const rightUpper = robot.getObjectByName("rightUpperArm");
   const rightFore = robot.getObjectByName("rightForearm");
   const leftUpper = robot.getObjectByName("leftUpperArm");
   const leftFore = robot.getObjectByName("leftForearm");
   const torso = robot.getObjectByName("torso");
-
-  const punch = Math.sin(Math.min(1, attackProgress) * Math.PI);
-  robot.scale.setScalar(1 + punch * 0.04);
-  if (urdf?.setJointValue) {
-    const reach = punch * (side === "left" ? -1 : 1);
-    urdf.setJointValue("right_shoulder_pitch_joint", -0.45 - punch * 1.15);
-    urdf.setJointValue("right_shoulder_roll_joint", reach * 0.35);
-    urdf.setJointValue("right_elbow_joint", 0.35 + punch * 1.2);
-    urdf.setJointValue("left_shoulder_pitch_joint", -0.2 + punch * 0.35);
-    urdf.setJointValue("left_elbow_joint", 0.7 - punch * 0.25);
-    urdf.setJointValue("waist_yaw_joint", reach * 0.22);
-  }
   if (rightUpper) {
-    rightUpper.position.z = punch * 0.52 * direction;
+    rightUpper.position.z = punch * 0.52;
     rightUpper.position.x = 0.36 + punch * 0.16;
     rightUpper.rotation.x = punch * 1.7;
   }
   if (rightFore) {
-    rightFore.position.z = punch * 0.95 * direction;
+    rightFore.position.z = punch * 0.95;
     rightFore.position.x = 0.47 + punch * 0.28;
     rightFore.rotation.x = punch * 2.1;
   }
   if (leftUpper) leftUpper.rotation.x = -0.35 - punch * 0.4;
   if (leftFore) leftFore.rotation.x = -0.45 - punch * 0.3;
-  if (torso) torso.rotation.z = -punch * 0.12 * direction;
+  if (torso) torso.rotation.z = -punch * 0.12;
 }
 
-function parsePlayerSide(raw: string | null): PlayerSide {
-  return raw === "2" || raw === "right" ? "right" : "left";
-}
+// Walk-cycle stride frequency (radians/sec at full speed). Footwork tuning and
+// the 2D movement math now live in arenaCombat so the local tick and the
+// authoritative server room loop stay in lockstep.
+const STRIDE_FREQ = 9;
 
 export function Arena3D() {
   const router = useRouter();
@@ -262,12 +440,14 @@ export function Arena3D() {
   const playerSide = parsePlayerSide(searchParams.get("player"));
   const playerNumber = playerSide === "left" ? 1 : 2;
   const [personaId, setPersonaId] = useState<string>("");
-  const vsHuman = personaId === "";
-  const multiplayer = useArenaMultiplayer({
-    enabled: vsHuman,
-    roomId,
-    playerSide,
-  });
+  // Online 1v1 is opt-in: pick "online" from the dropdown, or arrive on a shared
+  // room link. Everything else (default + AI personas) is local play with live
+  // keyboard footwork, so WASD/arrow movement keeps working.
+  const onlineMode = personaId === "online" || !!roomId;
+  // A real AI persona is selected (not local human, not online).
+  const aiPersonaId = onlineMode ? "" : personaId;
+  const multiplayer = useArenaMultiplayer({ enabled: onlineMode, roomId, playerSide });
+
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const resizeSceneRef = useRef<(() => void) | null>(null);
@@ -277,10 +457,15 @@ export function Arena3D() {
   const rightStateRef = useRef<FighterState | null>(null);
   const deckCardsRef = useRef<MoveCard[]>([]);
   const playMoveRef = useRef<((side: PlayerSide, move: ArenaMove) => void) | null>(null);
+  // Currently-held movement keys (lowercased). Read by the movement tick.
+  const keysRef = useRef<Set<string>>(new Set());
+  // The AI's current walk intent for Player 2: 1 = advance toward the player,
+  // 0 = hold position. The movement tick turns "advance" into a 2D step.
+  const aiIntentRef = useRef<number>(0);
   const [moves, setMoves] = useState<ArenaMove[]>([]);
   const [deckCards, setDeckCards] = useState<MoveCard[]>([]);
-  const [left, setLeft] = useState<FighterState>(() => createFighter("Player 1", -1.15));
-  const [right, setRight] = useState<FighterState>(() => createFighter("Player 2", 1.15));
+  const [left, setLeft] = useState<FighterState>(() => createFighter("Player 1", -1.15, 0));
+  const [right, setRight] = useState<FighterState>(() => createFighter("Player 2", 1.15, Math.PI));
   const [log, setLog] = useState<string[]>([
     "Choose a move. Each robot can play robot-skill cards like Street Fighter specials.",
   ]);
@@ -330,6 +515,7 @@ export function Arena3D() {
     announcer.setEnabled(announcerOn);
   }, [announcerOn]);
 
+  // Redirect to include room code in URL once the multiplayer hook creates it.
   useEffect(() => {
     if (!multiplayer.roomCode || multiplayer.roomCode === roomId) return;
     const params = new URLSearchParams(searchParams.toString());
@@ -337,6 +523,7 @@ export function Arena3D() {
     router.replace(`/arena?${params.toString()}`);
   }, [multiplayer.roomCode, roomId, router, searchParams]);
 
+  // Sync fighter state from multiplayer room snapshots.
   useEffect(() => {
     if (!multiplayer.snapshot) return;
     setLeft(multiplayer.snapshot.left);
@@ -345,11 +532,54 @@ export function Arena3D() {
   }, [multiplayer.snapshot]);
 
   useEffect(() => {
-    multiplayer.setOnLogLine((line) => {
-      void announcer.speak(line);
-    });
+    multiplayer.setOnLogLine((line) => void announcer.speak(line));
     return () => multiplayer.setOnLogLine(null);
   }, [multiplayer]);
+
+  // Footwork input: WASD walks Player 1, the arrow keys walk Player 2, both
+  // across the full mat. We only track which keys are held here; the movement
+  // tick turns that into motion.
+  useEffect(() => {
+    const tracked = new Set([
+      "w",
+      "a",
+      "s",
+      "d",
+      "arrowup",
+      "arrowdown",
+      "arrowleft",
+      "arrowright",
+    ]);
+    const onDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (!tracked.has(key)) return;
+      // Don't hijack keys while an input/select/textarea/contenteditable is
+      // focused (e.g. changing the Player 2 AI dropdown with arrow keys).
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "SELECT" ||
+        tag === "TEXTAREA" ||
+        el?.isContentEditable
+      ) {
+        return;
+      }
+      // Stop the arrow keys from scrolling the page while fighting.
+      if (key.startsWith("arrow")) e.preventDefault();
+      keysRef.current.add(key);
+    };
+    const onUp = (e: KeyboardEvent) => keysRef.current.delete(e.key.toLowerCase());
+    const clear = () => keysRef.current.clear();
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
 
   useEffect(() => {
     fetch("/api/tts")
@@ -411,12 +641,12 @@ export function Arena3D() {
   // controller contract as the headless arena. The per-frame decide() runs on
   // the existing decay-tick cadence; NO LLM in this loop.
   useEffect(() => {
-    if (!personaId) return;
-    const persona = getPersona(personaId);
+    if (!aiPersonaId) return;
+    const persona = getPersona(aiPersonaId);
     if (!persona) return;
     setRight((p) => ({ ...p, name: persona.name }));
     const controller: FighterController = makePersonaController(persona);
-    const rng = makeRng(0xa1 + personaId.length);
+    const rng = makeRng(0xa1 + aiPersonaId.length);
     let tick = 0;
     const timer = setInterval(() => {
       const now = Date.now();
@@ -425,9 +655,12 @@ export function Arena3D() {
       const deck = deckCardsRef.current;
       if (!ls || !rs || !deck.length) return;
       if (ls.hp <= 0 || rs.hp <= 0) return; // match decided
-      // Recovering from its own move, or too winded — rest and regenerate. This
-      // paces the AI instead of letting it spam, and lets stamina drive variety.
-      if (now < rs.recoverUntil || rs.stamina < MIN_STAMINA_TO_ACT) return;
+      // Locked in recovery — can neither strike nor reposition. (Footwork is
+      // free of stamina, so being winded no longer blocks walking into range.)
+      if (now < rs.recoverUntil) {
+        aiIntentRef.current = 0;
+        return;
+      }
       tick += 1;
       // The opponent's stance/cooldown is real now, so the tactician sees a live
       // world: it whiff-punishes when the player is recovering and backs off when
@@ -455,42 +688,44 @@ export function Arena3D() {
             stance: ls.attacking ? "extended" : ls.stance,
           },
           deck,
-          // The arena UI has no footwork/spacing mechanic — move buttons always
-          // connect — so the enemy fights from a fixed in-pocket range. Using the
-          // raw x-gap (~2.3) would read as permanently out of reach, leaving the
-          // executor stuck choosing "advance" (a no-op here) and never throwing.
-          range: 0.6,
+          // Real spacing now: the 2D gap between the fighters drives the brain,
+          // so the executor walks the enemy into reach ("advance") and only
+          // throws ("move") once a strike can actually land.
+          range: Math.hypot(ls.x - rs.x, ls.z - rs.z),
         },
         rng,
       );
-      // "advance"/"wait" are footwork the UI can't express, so treat any
-      // committed move as the action and let other beats pass as spacing.
       if (action.kind === "move") {
         const am = usableMoves.find((m) => m.id === action.moveId) ?? usableMoves[0];
-        // Only throw if it can actually afford this move; otherwise rest this
-        // beat to regenerate (the breather is part of the rhythm).
+        // In range: stop walking and commit, if it can afford the move; else
+        // rest this beat to regenerate (the breather is part of the rhythm).
+        aiIntentRef.current = 0;
         if (am && rs.stamina >= staminaCostFor(am)) playMoveRef.current?.("right", am);
+      } else if (action.kind === "advance") {
+        // Out of range: close in on the player until a strike can connect (the
+        // movement tick steps straight toward them across the mat).
+        aiIntentRef.current = 1;
+      } else {
+        aiIntentRef.current = 0; // wait / space
       }
     }, 260);
-    return () => clearInterval(timer);
-  }, [personaId, usableMoves]);
+    return () => {
+      clearInterval(timer);
+      aiIntentRef.current = 0;
+    };
+  }, [aiPersonaId, usableMoves]);
 
   useEffect(() => {
     if (!hostRef.current) return;
     const host = hostRef.current;
     const scene = new THREE.Scene();
-    addArenaBackground(scene);
+    const env = addArenaBackground(scene);
 
-    const camera = new THREE.PerspectiveCamera(
-      45,
-      host.clientWidth / Math.max(host.clientHeight, 1),
-      0.1,
-      100,
-    );
+    const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(host.clientWidth, host.clientHeight || 560);
+    renderer.setSize(host.clientWidth, 560);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     host.appendChild(renderer.domElement);
@@ -520,53 +755,72 @@ export function Arena3D() {
 
     const leftBot = makeRobot("#3dd68c");
     const rightBot = makeRobot("#ff5c5c");
-    leftBot.position.x = left.x;
-    rightBot.position.x = right.x;
+    leftBot.position.set(left.x, 0, left.z);
+    leftBot.rotation.y = left.facing;
+    rightBot.position.set(right.x, 0, right.z);
+    rightBot.rotation.y = right.facing;
     scene.add(leftBot, rightBot);
     leftRobot.current = leftBot;
     rightRobot.current = rightBot;
 
     let raf = 0;
+    let lastT = 0;
     const clock = new THREE.Clock();
+    const blockFramesRef = blockTrajectoryRef;
+
+    const driveBot = (
+      bot: THREE.Group,
+      state: FighterState,
+      attackMatches: boolean,
+      dt: number,
+    ) => {
+      const progress = attackMatches ? attackProgressFor(state) : 0;
+
+      bot.rotation.y = angleLerp(bot.rotation.y, state.facing, 0.35);
+      const fwdX = Math.cos(bot.rotation.y);
+      const fwdZ = -Math.sin(bot.rotation.y);
+
+      const lunge =
+        state.attackMoveId === "block" ? 0 : progress * (1 - progress) * 1.5;
+      const [targetX, targetZ] = clampToBox(
+        state.x + fwdX * lunge,
+        state.z + fwdZ * lunge,
+        BOUND_X,
+        BOUND_Z,
+      );
+      bot.position.x = THREE.MathUtils.lerp(bot.position.x, targetX, 0.3);
+      bot.position.z = THREE.MathUtils.lerp(bot.position.z, targetZ, 0.3);
+
+      const ud = bot.userData;
+      const walkInt = THREE.MathUtils.lerp((ud.walkInt as number) ?? 0, state.walk, 0.18);
+      ud.walkInt = walkInt;
+      const phase = ((ud.walkPhase as number) ?? 0) + dt * STRIDE_FREQ * walkInt;
+      ud.walkPhase = phase;
+
+      setRobotPose(
+        bot,
+        progress,
+        state.hitFlash,
+        state.attackAnim,
+        phase,
+        walkInt,
+        state.attackMoveId,
+        blockFramesRef.current,
+      );
+    };
+
     const loop = () => {
       raf = requestAnimationFrame(loop);
       const t = clock.getElapsedTime();
+      const dt = Math.min(0.05, t - lastT);
+      lastT = t;
       const leftState = leftStateRef.current ?? left;
       const rightState = rightStateRef.current ?? right;
-      const blockFrames = blockTrajectoryRef.current;
-      const leftProgress =
-        leftState.attackSide === "left" ? attackProgressFor(leftState) : 0;
-      const rightProgress =
-        rightState.attackSide === "right" ? attackProgressFor(rightState) : 0;
 
-      const leftLunge =
-        leftState.attackMoveId === "block"
-          ? 0
-          : leftProgress * (1 - leftProgress) * 1.5;
-      const rightLunge =
-        rightState.attackMoveId === "block"
-          ? 0
-          : rightProgress * (1 - rightProgress) * 1.5;
-      leftBot.position.x = THREE.MathUtils.lerp(leftBot.position.x, leftState.x + leftLunge, 0.28);
-      rightBot.position.x = THREE.MathUtils.lerp(rightBot.position.x, rightState.x - rightLunge, 0.28);
-      leftBot.position.z = Math.sin(t * 2.2) * 0.015;
-      rightBot.position.z = -Math.sin(t * 2.1) * 0.015;
-      setRobotPose(
-        leftBot,
-        "left",
-        leftProgress,
-        leftState.hitFlash,
-        leftState.attackMoveId,
-        blockFrames,
-      );
-      setRobotPose(
-        rightBot,
-        "right",
-        rightProgress,
-        rightState.hitFlash,
-        rightState.attackMoveId,
-        blockFrames,
-      );
+      driveBot(leftBot, leftState, leftState.attackSide === "left", dt);
+      driveBot(rightBot, rightState, rightState.attackSide === "right", dt);
+
+      applyRopeContacts(env.ropes, [leftBot.position, rightBot.position]);
 
       controls.update();
       renderer.render(scene, camera);
@@ -597,14 +851,63 @@ export function Arena3D() {
   }, []);
 
   useEffect(() => {
-    if (multiplayer.isMultiplayer) return;
+    if (multiplayer.isMultiplayer) return; // server simulates footwork in multiplayer
     const timer = setInterval(() => {
       const now = Date.now();
-      setLeft((p) => decayFighter(p, now));
-      setRight((p) => decayFighter(p, now));
+      const ls = leftStateRef.current;
+      const rs = rightStateRef.current;
+      if (!ls || !rs) {
+        setLeft((p) => decayFighter(p, now));
+        setRight((p) => decayFighter(p, now));
+        return;
+      }
+
+      // P1 always walks with WASD. P2 is either the AI (advance = walk forward)
+      // or the local arrow keys. advanceFooting gates these to neutral and
+      // applies the facing/collision/decay shared with the server.
+      const keys = keysRef.current;
+      const leftInput: FootInput = { fwd: 0, strafe: 0 };
+      if (keys.has("w")) leftInput.fwd += 1;
+      if (keys.has("s")) leftInput.fwd -= 1;
+      if (keys.has("d")) leftInput.strafe += 1;
+      if (keys.has("a")) leftInput.strafe -= 1;
+
+      const rightInput: FootInput = { fwd: 0, strafe: 0 };
+      if (aiPersonaId) {
+        if (aiIntentRef.current === 1) rightInput.fwd += 1;
+      } else {
+        if (keys.has("arrowup")) rightInput.fwd += 1;
+        if (keys.has("arrowdown")) rightInput.fwd -= 1;
+        if (keys.has("arrowright")) rightInput.strafe += 1;
+        if (keys.has("arrowleft")) rightInput.strafe -= 1;
+      }
+
+      const next = advanceFooting(ls, rs, leftInput, rightInput, now, MOVE_SPEED * 0.04);
+      setLeft(next.left);
+      setRight(next.right);
     }, 40);
     return () => clearInterval(timer);
-  }, [multiplayer.isMultiplayer]);
+  }, [aiPersonaId, multiplayer.isMultiplayer]);
+
+  // In online play, stream this client's footwork intent to the server (which
+  // simulates it authoritatively). We read both WASD and arrows so each player
+  // drives their own fighter however they like; the hook dedupes by direction.
+  useEffect(() => {
+    if (!multiplayer.isMultiplayer) return;
+    const timer = setInterval(() => {
+      const keys = keysRef.current;
+      const input: FootInput = { fwd: 0, strafe: 0 };
+      if (keys.has("w") || keys.has("arrowup")) input.fwd += 1;
+      if (keys.has("s") || keys.has("arrowdown")) input.fwd -= 1;
+      if (keys.has("d") || keys.has("arrowright")) input.strafe += 1;
+      if (keys.has("a") || keys.has("arrowleft")) input.strafe -= 1;
+      multiplayer.sendInput(input);
+    }, 60);
+    return () => clearInterval(timer);
+    // sendInput is a stable useCallback; depending on the whole multiplayer
+    // object would recreate this interval on every snapshot (~25Hz).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multiplayer.isMultiplayer, multiplayer.sendInput]);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
     if (multiplayer.isMultiplayer) {
@@ -612,13 +915,11 @@ export function Arena3D() {
       void multiplayer.playRemoteMove(move);
       return;
     }
-
     const now = Date.now();
     const ls = leftStateRef.current ?? left;
     const rs = rightStateRef.current ?? right;
     const result = applyMove(ls, rs, side, move, now);
     if (!result) return;
-
     setLeft(result.left);
     setRight(result.right);
     setLog((prev) => [result.logLine, ...prev.slice(0, 4)]);
@@ -667,10 +968,10 @@ export function Arena3D() {
       void multiplayer.resetRemote();
       return;
     }
-
     koSpokenRef.current = false;
-    setLeft(createFighter(left.name, -1.15));
-    setRight(createFighter(right.name, 1.15));
+    aiIntentRef.current = 0;
+    setLeft(createFighter(left.name, -1.15, 0));
+    setRight(createFighter(right.name, 1.15, Math.PI));
     const line = resetCall();
     setLog([line]);
     void announcer.speak(line);
@@ -684,8 +985,8 @@ export function Arena3D() {
   const renderNow = Date.now();
   const leftBusy = renderNow < left.recoverUntil || left.stamina < MIN_STAMINA_TO_ACT;
   const rightBusy = renderNow < right.recoverUntil || right.stamina < MIN_STAMINA_TO_ACT;
-  // Player 2 is auto-piloted while a persona is selected.
-  const rightIsAI = personaId !== "";
+  // Player 2 is auto-piloted while a real AI persona is selected.
+  const rightIsAI = aiPersonaId !== "";
   const shareUrl =
     multiplayer.roomCode && typeof window !== "undefined"
       ? buildArenaShareUrl(multiplayer.roomCode)
@@ -712,11 +1013,10 @@ export function Arena3D() {
             <p className="text-sm text-[#8888a0]">
               Two G1-inspired fighters face off using scored robot move cards. You are Player{" "}
               {playerNumber}.
-              {vsHuman && (
+              {onlineMode && (
                 <span className="mt-1 block">
                   {multiplayer.status === "connecting" && "Connecting to arena room…"}
-                  {multiplayer.status === "waiting" &&
-                    multiplayer.roomCode &&
+                  {multiplayer.status === "waiting" && multiplayer.roomCode &&
                     "Waiting for Player 2 — share the link below."}
                   {multiplayer.status === "live" && "Live 1v1 — moves sync in real time."}
                   {multiplayer.status === "error" && (
@@ -724,7 +1024,7 @@ export function Arena3D() {
                   )}
                 </span>
               )}
-              {playerSide === "left" && vsHuman && shareUrl && (
+              {playerSide === "left" && onlineMode && shareUrl && (
                 <span className="mt-1 block">
                   Player 2 link:{" "}
                   <code className="break-all rounded bg-black/30 px-1.5 py-0.5 text-[#3dd68c]">
@@ -749,7 +1049,8 @@ export function Arena3D() {
                   disabled={multiplayer.status === "live"}
                   className="rounded-lg border border-[#2a2a3d] bg-[#14141f] px-3 py-2 text-sm text-[#e8e8f0] outline-none focus:border-[#7c5cff] disabled:opacity-50"
                 >
-                  <option value="">Human opponent (online)</option>
+                  <option value="">Local 2-player (P1 WASD / P2 arrows)</option>
+                  <option value="online">Human opponent (online)</option>
                   {listPersonas().map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
@@ -807,38 +1108,27 @@ export function Arena3D() {
           ref={viewportRef}
           className="relative bg-[#060707] [&:fullscreen]:h-full [&:fullscreen]:w-full"
         >
-          <div
-            ref={hostRef}
-            className={isFullscreen ? "h-full w-full" : "h-[560px] w-full"}
-          />
+          <div ref={hostRef} className="h-[560px] [&:fullscreen]:h-full" />
           <button
             type="button"
             onClick={toggleFullscreen}
+            className="absolute right-4 top-4 z-10 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-1.5 text-xs text-[#e8e8f0] backdrop-blur transition hover:border-[#7c5cff]"
             aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-            className="absolute right-4 top-4 z-20 rounded-lg border border-[#2a2a3d] bg-black/60 p-2 text-[#e8e8f0] backdrop-blur transition hover:border-[#7c5cff]"
           >
-            {isFullscreen ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </svg>
-            )}
+            {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
           </button>
-          <div className="absolute left-4 top-4 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
-            Drag to rotate · scroll/pinch to zoom · right-drag to pan
+          <div className="absolute left-4 top-4 space-y-1 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
+            <div>Drag to rotate · scroll/pinch to zoom · right-drag to pan</div>
+            <div className="text-[#8888a0]">
+              Move: <span className="text-[#3dd68c]">P1 WASD</span>
+              {rightIsAI ? (
+                <> · <span className="text-[#ff5c5c]">P2 auto</span></>
+              ) : (
+                <> · <span className="text-[#ff5c5c]">P2 arrows</span></>
+              )}{" "}
+              · strikes <span className="text-[#a78bfa]">1–{Math.min(usableMoves.length, 4)}</span>
+              · circle in to land, flank to dodge
+            </div>
           </div>
           <Image
             src="/models/unitree_g1/g1.png"
@@ -861,6 +1151,15 @@ export function Arena3D() {
         onPlay={playMove}
         disabled={!!winner || (playerSide === "left" ? leftBusy : rightBusy)}
       />
+      {!multiplayer.isMultiplayer && (
+        <MoveControls
+          title={rightIsAI ? `Player 2 moves (${right.name} AI)` : "Player 2 moves"}
+          side={playerSide === "left" ? "right" : "left"}
+          moves={usableMoves}
+          onPlay={playMove}
+          disabled={!!winner || (playerSide === "left" ? rightBusy : leftBusy)}
+        />
+      )}
 
       <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
         <p className="mb-3 text-xs uppercase tracking-[0.18em] text-[#8888a0]">
