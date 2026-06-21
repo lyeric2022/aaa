@@ -1,38 +1,32 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import URDFLoader from "urdf-loader";
-import type { MoveRecord } from "@/lib/types";
-import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
+import type { MoveCard, MoveRecord } from "@/lib/types";
+import { getPersona, listPersonas, makePersonaController } from "@/lib/enemy/personas";
+import { makeRng } from "@/lib/enemy/rng";
+import type { FighterController } from "@/lib/enemy/types";
+import { announcer, koCall, resetCall } from "@/lib/announcer";
+import {
+  ARENA_BASICS,
+  applyMove,
+  createFighter,
+  decayFighter,
+  MIN_STAMINA_TO_ACT,
+  staminaCostFor,
+  type ArenaMove,
+  type FighterState,
+  type PlayerSide,
+} from "@/lib/arenaCombat";
 import { applyCameraFrame } from "@/lib/cameraFrame";
 import { useCameraDebug } from "@/lib/useCameraDebug";
+import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
 import { CameraDebugPanel } from "@/components/CameraDebugPanel";
 import { addArenaBackground } from "@/lib/arenaEnvironment";
-
-type PlayerSide = "left" | "right";
-
-type FighterState = {
-  name: string;
-  hp: number;
-  balance: number;
-  x: number;
-  attacking: boolean;
-  attackSide: PlayerSide | null;
-  attackStart: number;
-  hitFlash: number;
-};
-
-type ArenaMove = {
-  id: string;
-  name: string;
-  speed: number;
-  power: number;
-  balanceRisk: number;
-  recovery: number;
-};
 
 function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
@@ -236,15 +230,23 @@ function setRobotPose(
   if (torso) torso.rotation.z = -punch * 0.12 * direction;
 }
 
-function damageFor(move: ArenaMove) {
-  return Math.round(8 + move.power * 0.22 + move.speed * 0.18);
-}
-
-function balanceDamageFor(move: ArenaMove) {
-  return Math.round(8 + move.balanceRisk * 0.22 + move.speed * 0.08);
+function parsePlayerSide(raw: string | null): PlayerSide {
+  return raw === "2" || raw === "right" ? "right" : "left";
 }
 
 export function Arena3D() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const roomId = searchParams.get("room");
+  const playerSide = parsePlayerSide(searchParams.get("player"));
+  const playerNumber = playerSide === "left" ? 1 : 2;
+  const [personaId, setPersonaId] = useState<string>("");
+  const vsHuman = personaId === "";
+  const multiplayer = useArenaMultiplayer({
+    enabled: vsHuman,
+    roomId,
+    playerSide,
+  });
   const hostRef = useRef<HTMLDivElement | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
   const rightRobot = useRef<THREE.Group | null>(null);
@@ -252,27 +254,12 @@ export function Arena3D() {
   const rightImpactRef = useRef<THREE.Mesh | null>(null);
   const leftStateRef = useRef<FighterState | null>(null);
   const rightStateRef = useRef<FighterState | null>(null);
+  const deckCardsRef = useRef<MoveCard[]>([]);
+  const playMoveRef = useRef<((side: PlayerSide, move: ArenaMove) => void) | null>(null);
   const [moves, setMoves] = useState<ArenaMove[]>([]);
-  const [left, setLeft] = useState<FighterState>({
-    name: "Player 1",
-    hp: 100,
-    balance: 100,
-    x: -1.15,
-    attacking: false,
-    attackSide: null,
-    attackStart: 0,
-    hitFlash: 0,
-  });
-  const [right, setRight] = useState<FighterState>({
-    name: "Player 2",
-    hp: 100,
-    balance: 100,
-    x: 1.15,
-    attacking: false,
-    attackSide: null,
-    attackStart: 0,
-    hitFlash: 0,
-  });
+  const [deckCards, setDeckCards] = useState<MoveCard[]>([]);
+  const [left, setLeft] = useState<FighterState>(() => createFighter("Player 1", -1.15));
+  const [right, setRight] = useState<FighterState>(() => createFighter("Player 2", 1.15));
   const [log, setLog] = useState<string[]>([
     "Choose a move. Each robot can play robot-skill cards like Street Fighter specials.",
   ]);
@@ -292,6 +279,27 @@ export function Arena3D() {
   }, [announcerOn]);
 
   useEffect(() => {
+    if (!multiplayer.roomCode || multiplayer.roomCode === roomId) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("room", multiplayer.roomCode);
+    router.replace(`/arena?${params.toString()}`);
+  }, [multiplayer.roomCode, roomId, router, searchParams]);
+
+  useEffect(() => {
+    if (!multiplayer.snapshot) return;
+    setLeft(multiplayer.snapshot.left);
+    setRight(multiplayer.snapshot.right);
+    setLog(multiplayer.snapshot.log);
+  }, [multiplayer.snapshot]);
+
+  useEffect(() => {
+    multiplayer.setOnLogLine((line) => {
+      void announcer.speak(line);
+    });
+    return () => multiplayer.setOnLogLine(null);
+  }, [multiplayer]);
+
+  useEffect(() => {
     fetch("/api/tts")
       .then((res) => res.json())
       .then((data: { configured?: boolean }) => setAnnouncerReady(Boolean(data.configured)))
@@ -302,29 +310,18 @@ export function Arena3D() {
     fetch("/api/moves")
       .then((r) => r.json())
       .then((records: MoveRecord[]) => {
-        const scored = records
-          .filter((r) => r.move_card.verdict !== "pending")
-          .map(toArenaMove);
-        setMoves(scored.length ? scored : []);
+        const usable = records.filter((r) => r.move_card.verdict !== "pending");
+        setMoves(usable.map(toArenaMove));
+        setDeckCards(usable.map((r) => r.move_card));
       });
   }, []);
-
-  const arenaBasics = useMemo<ArenaMove[]>(
-    () => [
-      { id: "basic_jab", name: "Quick Jab", speed: 72, power: 11, balanceRisk: 28, recovery: 64 },
-      { id: "basic_cross", name: "Counter Cross", speed: 54, power: 22, balanceRisk: 48, recovery: 50 },
-      { id: "basic_sweep", name: "Low Sweep", speed: 46, power: 17, balanceRisk: 62, recovery: 44 },
-      { id: "basic_guard", name: "Guard Break", speed: 38, power: 26, balanceRisk: 70, recovery: 36 },
-    ],
-    [],
-  );
 
   // Always give each fighter a varied kit: the player's real scored moves
   // first, then arena archetypes to fill out a 4-slot loadout.
   const usableMoves = useMemo<ArenaMove[]>(() => {
     const roster: ArenaMove[] = [];
     const seen = new Set<string>();
-    for (const move of [...moves, ...arenaBasics]) {
+    for (const move of [...moves, ...ARENA_BASICS]) {
       const key = move.name.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -332,7 +329,108 @@ export function Arena3D() {
       if (roster.length >= 4) break;
     }
     return roster;
-  }, [moves, arenaBasics]);
+  }, [moves]);
+
+  // Full MoveCards for the enemy brain, aligned to the displayed roster (it
+  // reads the SAME scored stats the scorer computes). Real scored cards are
+  // reused; arena-basic fillers are synthesized from their ArenaMove.
+  const usableDeck = useMemo<MoveCard[]>(() => {
+    const byId = new Map(deckCards.map((c) => [c.id, c]));
+    return usableMoves.map(
+      (m): MoveCard =>
+        byId.get(m.id) ?? {
+          id: m.id,
+          name: m.name,
+          source: "sonic_zip",
+          attack_type: "strike_combo",
+          studio_sonic_validated: false,
+          stats: {
+            speed: m.speed,
+            power: m.power,
+            smoothness: 80,
+            balance_risk: m.balanceRisk,
+            recovery: m.recovery,
+            deployability: 60,
+          },
+          verdict: "needs_edits",
+          coach_feedback: "",
+          created_at: "1970-01-01T00:00:00.000Z",
+          pipeline: { data: "fallback", eval: "fallback", deploy: "fallback" },
+        },
+    );
+  }, [deckCards, usableMoves]);
+
+  useEffect(() => {
+    deckCardsRef.current = usableDeck;
+  }, [usableDeck]);
+
+  // AI opponent: when a persona is selected it drives Player 2 through the same
+  // controller contract as the headless arena. The per-frame decide() runs on
+  // the existing decay-tick cadence; NO LLM in this loop.
+  useEffect(() => {
+    if (!personaId) return;
+    const persona = getPersona(personaId);
+    if (!persona) return;
+    setRight((p) => ({ ...p, name: persona.name }));
+    const controller: FighterController = makePersonaController(persona);
+    const rng = makeRng(0xa1 + personaId.length);
+    let tick = 0;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const ls = leftStateRef.current;
+      const rs = rightStateRef.current;
+      const deck = deckCardsRef.current;
+      if (!ls || !rs || !deck.length) return;
+      if (ls.hp <= 0 || rs.hp <= 0) return; // match decided
+      // Recovering from its own move, or too winded — rest and regenerate. This
+      // paces the AI instead of letting it spam, and lets stamina drive variety.
+      if (now < rs.recoverUntil || rs.stamina < MIN_STAMINA_TO_ACT) return;
+      tick += 1;
+      // The opponent's stance/cooldown is real now, so the tactician sees a live
+      // world: it whiff-punishes when the player is recovering and backs off when
+      // its own balance/stamina is low — different decisions on different beats.
+      const action = controller.decide(
+        {
+          tick,
+          // The UI throttles decide() to off-cooldown beats, so each call is one
+          // executor frame — 15 Hz makes the tactician re-score every beat.
+          rateHz: 15,
+          self: {
+            hp: rs.hp,
+            x: rs.x,
+            balance: rs.balance,
+            stamina: rs.stamina,
+            cooldown: now < rs.recoverUntil ? 1 : 0,
+            stance: rs.stance,
+          },
+          opponent: {
+            hp: ls.hp,
+            x: ls.x,
+            balance: ls.balance,
+            stamina: ls.stamina,
+            cooldown: now < ls.recoverUntil ? 1 : 0,
+            stance: ls.attacking ? "extended" : ls.stance,
+          },
+          deck,
+          // The arena UI has no footwork/spacing mechanic — move buttons always
+          // connect — so the enemy fights from a fixed in-pocket range. Using the
+          // raw x-gap (~2.3) would read as permanently out of reach, leaving the
+          // executor stuck choosing "advance" (a no-op here) and never throwing.
+          range: 0.6,
+        },
+        rng,
+      );
+      // "advance"/"wait" are footwork the UI can't express, so treat any
+      // committed move as the action and let other beats pass as spacing.
+      if (action.kind === "move") {
+        const am = usableMoves.find((m) => m.id === action.moveId) ?? usableMoves[0];
+        // Only throw if it can actually afford this move; otherwise rest this
+        // beat to regenerate (the breather is part of the rhythm).
+        if (am && rs.stamina >= staminaCostFor(am)) playMoveRef.current?.("right", am);
+      }
+    }, 260);
+    return () => clearInterval(timer);
+  }, [personaId, usableMoves]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -449,69 +547,65 @@ export function Arena3D() {
   }, []);
 
   useEffect(() => {
+    if (multiplayer.isMultiplayer) return;
     const timer = setInterval(() => {
-      setLeft((p) => ({
-        ...p,
-        hitFlash: Math.max(0, p.hitFlash - 0.08),
-        attacking: p.attacking && Date.now() - p.attackStart < 520,
-        attackSide: Date.now() - p.attackStart < 520 ? p.attackSide : null,
-      }));
-      setRight((p) => ({
-        ...p,
-        hitFlash: Math.max(0, p.hitFlash - 0.08),
-        attacking: p.attacking && Date.now() - p.attackStart < 520,
-        attackSide: Date.now() - p.attackStart < 520 ? p.attackSide : null,
-      }));
+      const now = Date.now();
+      setLeft((p) => decayFighter(p, now));
+      setRight((p) => decayFighter(p, now));
     }, 40);
     return () => clearInterval(timer);
-  }, []);
+  }, [multiplayer.isMultiplayer]);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
-    const ls = leftStateRef.current ?? left;
-    const rs = rightStateRef.current ?? right;
-    if (ls.hp <= 0 || rs.hp <= 0) return;
-
-    const dmg = damageFor(move);
-    const bal = balanceDamageFor(move);
-    const knock = 0.18 + move.speed / 500;
-    const attackerName = side === "left" ? left.name : right.name;
-    const defenderName = side === "left" ? right.name : left.name;
-
-    if (side === "left") {
-      setLeft((p) => ({ ...p, attacking: true, attackSide: "left", attackStart: Date.now() }));
-      setRight((p) => ({
-        ...p,
-        hp: clamp(p.hp - dmg),
-        balance: clamp(p.balance - bal),
-        x: Math.min(1.55, p.x + knock),
-        hitFlash: 1,
-      }));
-    } else {
-      setRight((p) => ({ ...p, attacking: true, attackSide: "right", attackStart: Date.now() }));
-      setLeft((p) => ({
-        ...p,
-        hp: clamp(p.hp - dmg),
-        balance: clamp(p.balance - bal),
-        x: Math.max(-1.55, p.x - knock),
-        hitFlash: 1,
-      }));
+    if (multiplayer.isMultiplayer) {
+      if (side !== playerSide) return;
+      void multiplayer.playRemoteMove(move);
+      return;
     }
 
-    const line = battleCall(attackerName, defenderName, move, dmg);
-    setLog((prev) => [line, ...prev.slice(0, 4)]);
-    void announcer.speak(line);
+    const now = Date.now();
+    const ls = leftStateRef.current ?? left;
+    const rs = rightStateRef.current ?? right;
+    const result = applyMove(ls, rs, side, move, now);
+    if (!result) return;
+
+    setLeft(result.left);
+    setRight(result.right);
+    setLog((prev) => [result.logLine, ...prev.slice(0, 4)]);
+    void announcer.speak(result.logLine.replace(/ \(counter!\)$/, ""));
   }
+  playMoveRef.current = playMove;
 
   function reset() {
+    if (multiplayer.isMultiplayer) {
+      if (playerSide !== "left") return;
+      koSpokenRef.current = false;
+      void multiplayer.resetRemote();
+      return;
+    }
+
     koSpokenRef.current = false;
-    setLeft((p) => ({ ...p, hp: 100, balance: 100, x: -1.15, hitFlash: 0 }));
-    setRight((p) => ({ ...p, hp: 100, balance: 100, x: 1.15, hitFlash: 0 }));
+    setLeft(createFighter(left.name, -1.15));
+    setRight(createFighter(right.name, 1.15));
     const line = resetCall();
     setLog([line]);
     void announcer.speak(line);
   }
 
-  const winner = left.hp <= 0 ? right.name : right.hp <= 0 ? left.name : null;
+  const winner =
+    multiplayer.snapshot?.winner ??
+    (left.hp <= 0 ? right.name : right.hp <= 0 ? left.name : null);
+  // Re-evaluated every render (the 40ms decay tick re-renders), so buttons grey
+  // out while a fighter is staggered/recovering or too winded to act.
+  const renderNow = Date.now();
+  const leftBusy = renderNow < left.recoverUntil || left.stamina < MIN_STAMINA_TO_ACT;
+  const rightBusy = renderNow < right.recoverUntil || right.stamina < MIN_STAMINA_TO_ACT;
+  // Player 2 is auto-piloted while a persona is selected.
+  const rightIsAI = personaId !== "";
+  const shareUrl =
+    multiplayer.roomCode && typeof window !== "undefined"
+      ? buildArenaShareUrl(multiplayer.roomCode)
+      : null;
 
   useEffect(() => {
     if (!winner || koSpokenRef.current) return;
@@ -532,7 +626,28 @@ export function Arena3D() {
             </p>
             <h1 className="text-2xl font-bold">3D robot-sports duel</h1>
             <p className="text-sm text-[#8888a0]">
-              Two G1-inspired fighters face off using scored robot move cards.
+              Two G1-inspired fighters face off using scored robot move cards. You are Player{" "}
+              {playerNumber}.
+              {vsHuman && (
+                <span className="mt-1 block">
+                  {multiplayer.status === "connecting" && "Connecting to arena room…"}
+                  {multiplayer.status === "waiting" &&
+                    multiplayer.roomCode &&
+                    "Waiting for Player 2 — share the link below."}
+                  {multiplayer.status === "live" && "Live 1v1 — moves sync in real time."}
+                  {multiplayer.status === "error" && (
+                    <span className="text-[#ff5c5c]">{multiplayer.error}</span>
+                  )}
+                </span>
+              )}
+              {playerSide === "left" && vsHuman && shareUrl && (
+                <span className="mt-1 block">
+                  Player 2 link:{" "}
+                  <code className="break-all rounded bg-black/30 px-1.5 py-0.5 text-[#3dd68c]">
+                    {shareUrl}
+                  </code>
+                </span>
+              )}
               {announcerReady === false && (
                 <span className="mt-1 block text-[#f5a623]">
                   Deepgram voice off — add DEEPGRAM_API_KEY to web/.env.local
@@ -540,10 +655,28 @@ export function Arena3D() {
               )}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            {playerSide === "left" && (
+              <label className="flex flex-col gap-1 text-xs text-[#8888a0]">
+                <span className="uppercase tracking-[0.18em]">Player 2 AI</span>
+                <select
+                  value={personaId}
+                  onChange={(e) => setPersonaId(e.target.value)}
+                  disabled={multiplayer.status === "live"}
+                  className="rounded-lg border border-[#2a2a3d] bg-[#14141f] px-3 py-2 text-sm text-[#e8e8f0] outline-none focus:border-[#7c5cff] disabled:opacity-50"
+                >
+                  <option value="">Human opponent (online)</option>
+                  {listPersonas().map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <button
               onClick={() => setAnnouncerOn((on) => !on)}
-              className={`rounded-lg border px-4 py-2 text-sm transition ${
+              className={`self-end rounded-lg border px-4 py-2 text-sm transition ${
                 announcerOn
                   ? "border-[#3dd68c]/50 bg-[#3dd68c]/10 text-[#3dd68c]"
                   : "border-[#2a2a3d] text-[#8888a0] hover:border-[#7c5cff]"
@@ -551,23 +684,39 @@ export function Arena3D() {
             >
               {announcerOn ? "🔊 Announcer on" : "🔇 Announcer off"}
             </button>
-            <button
-              onClick={reset}
-              className="rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
-            >
-              Reset round
-            </button>
+            {(playerSide === "left" || !multiplayer.isMultiplayer) && (
+              <button
+                onClick={reset}
+                className="self-end rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
+              >
+                Reset round
+              </button>
+            )}
           </div>
         </div>
 
         <div className="grid gap-3 p-4 md:grid-cols-[1fr_240px_1fr]">
-          <HealthPanel name={left.name} hp={left.hp} balance={left.balance} accent="#3dd68c" />
+          <HealthPanel
+            name={left.name}
+            hp={left.hp}
+            balance={left.balance}
+            stamina={left.stamina}
+            stance={left.stance}
+            accent="#3dd68c"
+          />
           <div className="grid place-items-center text-center">
             <div className="rounded-full border border-[#2a2a3d] bg-black/30 px-5 py-2 text-sm font-bold">
               {winner ? `${winner} WINS` : "VS"}
             </div>
           </div>
-          <HealthPanel name={right.name} hp={right.hp} balance={right.balance} accent="#ff5c5c" />
+          <HealthPanel
+            name={right.name}
+            hp={right.hp}
+            balance={right.balance}
+            stamina={right.stamina}
+            stance={right.stance}
+            accent="#ff5c5c"
+          />
         </div>
 
         <div className="relative">
@@ -591,22 +740,17 @@ export function Arena3D() {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <MoveControls
-          title="Player 1 moves"
-          side="left"
-          moves={usableMoves}
-          onPlay={playMove}
-          disabled={!!winner}
-        />
-        <MoveControls
-          title="Player 2 moves"
-          side="right"
-          moves={usableMoves}
-          onPlay={playMove}
-          disabled={!!winner}
-        />
-      </div>
+      <MoveControls
+        title={
+          playerSide === "right" && rightIsAI
+            ? `Player ${playerNumber} moves (${right.name} AI)`
+            : `Player ${playerNumber} moves`
+        }
+        side={playerSide}
+        moves={usableMoves}
+        onPlay={playMove}
+        disabled={!!winner || (playerSide === "left" ? leftBusy : rightBusy)}
+      />
 
       <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
         <p className="mb-3 text-xs uppercase tracking-[0.18em] text-[#8888a0]">
@@ -628,11 +772,15 @@ function HealthPanel({
   name,
   hp,
   balance,
+  stamina,
+  stance,
   accent,
 }: {
   name: string;
   hp: number;
   balance: number;
+  stamina: number;
+  stance: FighterState["stance"];
   accent: string;
 }) {
   return (
@@ -644,9 +792,18 @@ function HealthPanel({
       <Bar value={hp} color={accent} />
       <div className="mt-2 flex items-center justify-between text-xs text-[#8888a0]">
         <span>Balance</span>
-        <span>{Math.round(balance)}</span>
+        {stance === "knockdown" ? (
+          <span className="font-semibold text-[#ff5c5c]">STAGGERED</span>
+        ) : (
+          <span>{Math.round(balance)}</span>
+        )}
       </div>
       <Bar value={balance} color="#f5a623" small />
+      <div className="mt-2 flex items-center justify-between text-xs text-[#8888a0]">
+        <span>Stamina</span>
+        <span>{Math.round(stamina)}</span>
+      </div>
+      <Bar value={stamina} color="#5cc8ff" small />
     </div>
   );
 }
