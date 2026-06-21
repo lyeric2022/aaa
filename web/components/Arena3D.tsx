@@ -24,11 +24,11 @@ import {
   type PlayerSide,
 } from "@/lib/arenaCombat";
 import { applyG1JointFrame } from "@/lib/g1Motion";
-import { applyCameraFrame } from "@/lib/cameraFrame";
-import { useCameraDebug } from "@/lib/useCameraDebug";
+import { applyCameraFrame, CAMERA_DEFAULTS } from "@/lib/cameraFrame";
 import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
-import { CameraDebugPanel } from "@/components/CameraDebugPanel";
 import { addArenaBackground } from "@/lib/arenaEnvironment";
+
+const ARENA_CAMERA_DEFAULT = CAMERA_DEFAULTS.arena;
 
 function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
@@ -269,6 +269,8 @@ export function Arena3D() {
     playerSide,
   });
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const resizeSceneRef = useRef<(() => void) | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
   const rightRobot = useRef<THREE.Group | null>(null);
   const leftStateRef = useRef<FighterState | null>(null);
@@ -286,8 +288,29 @@ export function Arena3D() {
   const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
   const koSpokenRef = useRef(false);
   const blockTrajectoryRef = useRef<number[][] | null>(null);
-  const { frame: cameraFrame, defaultFrame: cameraDefault, syncFromScene, resetToDefault } =
-    useCameraDebug("arena");
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === viewportRef.current);
+      resizeSceneRef.current?.();
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  function toggleFullscreen() {
+    if (!viewportRef.current) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      return;
+    }
+    void viewportRef.current.requestFullscreen();
+  }
+
+  useEffect(() => {
+    resizeSceneRef.current?.();
+  }, [isFullscreen]);
 
   useEffect(() => {
     fetch("/api/moves/block/trajectory")
@@ -458,17 +481,22 @@ export function Arena3D() {
     const scene = new THREE.Scene();
     addArenaBackground(scene);
 
-    const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      host.clientWidth / Math.max(host.clientHeight, 1),
+      0.1,
+      100,
+    );
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(host.clientWidth, 560);
+    renderer.setSize(host.clientWidth, host.clientHeight || 560);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    applyCameraFrame(camera, controls, cameraDefault);
+    applyCameraFrame(camera, controls, ARENA_CAMERA_DEFAULT);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = true;
@@ -541,21 +569,25 @@ export function Arena3D() {
       );
 
       controls.update();
-      syncFromScene(camera, controls);
       renderer.render(scene, camera);
     };
     loop();
 
     const resize = () => {
       if (!hostRef.current) return;
-      camera.aspect = hostRef.current.clientWidth / 560;
+      const width = hostRef.current.clientWidth;
+      const height = hostRef.current.clientHeight || 560;
+      camera.aspect = width / height;
       camera.updateProjectionMatrix();
-      renderer.setSize(hostRef.current.clientWidth, 560);
+      renderer.setSize(width, height);
     };
+    resizeSceneRef.current = resize;
+    resize();
     window.addEventListener("resize", resize);
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
+      resizeSceneRef.current = null;
       controls.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);
@@ -593,6 +625,40 @@ export function Arena3D() {
     void announcer.speak(result.logLine.replace(/ \(counter!\)$/, ""));
   }
   playMoveRef.current = playMove;
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const slot = Number(e.key);
+      if (!Number.isInteger(slot) || slot < 1 || slot > 4) return;
+
+      const move = usableMoves[slot - 1];
+      if (!move) return;
+
+      const ls = leftStateRef.current;
+      const rs = rightStateRef.current;
+      if (!ls || !rs || ls.hp <= 0 || rs.hp <= 0) return;
+
+      const now = Date.now();
+      const self = playerSide === "left" ? ls : rs;
+      if (now < self.recoverUntil || self.stamina < MIN_STAMINA_TO_ACT) return;
+
+      e.preventDefault();
+      playMoveRef.current?.(playerSide, move);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [usableMoves, playerSide]);
 
   function reset() {
     if (multiplayer.isMultiplayer) {
@@ -737,14 +803,40 @@ export function Arena3D() {
           />
         </div>
 
-        <div className="relative">
-          <div ref={hostRef} className="h-[560px]" />
-          <CameraDebugPanel
-            label="Arena camera"
-            frame={cameraFrame}
-            defaultFrame={cameraDefault}
-            onReset={resetToDefault}
+        <div
+          ref={viewportRef}
+          className="relative bg-[#060707] [&:fullscreen]:h-full [&:fullscreen]:w-full"
+        >
+          <div
+            ref={hostRef}
+            className={isFullscreen ? "h-full w-full" : "h-[560px] w-full"}
           />
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+            className="absolute right-4 top-4 z-20 rounded-lg border border-[#2a2a3d] bg-black/60 p-2 text-[#e8e8f0] backdrop-blur transition hover:border-[#7c5cff]"
+          >
+            {isFullscreen ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            )}
+          </button>
           <div className="absolute left-4 top-4 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
             Drag to rotate · scroll/pinch to zoom · right-drag to pan
           </div>
@@ -852,20 +944,28 @@ function MoveControls({
 }) {
   return (
     <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
-      <p className="mb-3 text-sm font-semibold">{title}</p>
+      <p className="mb-3 text-sm font-semibold">
+        {title}
+        <span className="ml-2 font-normal text-[#8888a0]">· keys 1–{Math.min(moves.length, 4)}</span>
+      </p>
       <div className="grid gap-2">
-        {moves.slice(0, 4).map((move) => (
+        {moves.slice(0, 4).map((move, index) => (
           <button
             key={`${side}-${move.id}`}
             onClick={() => onPlay(side, move)}
             disabled={disabled}
-            className="rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
+            className="flex items-start gap-3 rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
           >
-            <div className="font-medium">{move.name}</div>
-            <div className="mt-1 text-xs text-[#8888a0]">
-              speed {Math.round(move.speed)} · power {Math.round(move.power)} · risk{" "}
-              {Math.round(move.balanceRisk)}
-            </div>
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#7c5cff]/40 bg-[#7c5cff]/10 font-mono text-sm font-bold text-[#a78bfa]">
+              {index + 1}
+            </span>
+            <span className="min-w-0">
+              <div className="font-medium">{move.name}</div>
+              <div className="mt-1 text-xs text-[#8888a0]">
+                speed {Math.round(move.speed)} · power {Math.round(move.power)} · risk{" "}
+                {Math.round(move.balanceRisk)}
+              </div>
+            </span>
           </button>
         ))}
       </div>
