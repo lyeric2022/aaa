@@ -31,6 +31,12 @@ export class EnemyController implements FighterController {
   private readonly model: PlayerModel = emptyPlayerModel();
   private intent: Intent;
   private chosen: ScoredMove | null = null;
+  /** Own recently committed moves (most recent first) — feeds anti-spam bias. */
+  private recent: string[] = [];
+  /** Monotonic count of decide() calls — drives the rate scheduler. Using this
+   *  instead of obs.tick keeps the schedule correct when decide is called
+   *  sparsely (e.g. only when off cooldown), where obs.tick jumps in big gaps. */
+  private frame = 0;
   /** Captured for the future (out-of-loop) LLM meta-coach. */
   private roundLog: { tick: number; intent: Intent; moveId: string | null }[] = [];
 
@@ -41,11 +47,12 @@ export class EnemyController implements FighterController {
   }
 
   decide(obs: ArenaObservation, rng: Rng): ArenaAction {
+    this.frame += 1;
     const stratEvery = everyNFrames(obs.rateHz, 3);
     const tacEvery = everyNFrames(obs.rateHz, 15);
 
     // Strategist (~3 Hz): refresh game-plan + intent from the player model.
-    if (obs.tick === 1 || obs.tick % stratEvery === 0) {
+    if (this.frame === 1 || this.frame % stratEvery === 0) {
       this.intent = chooseIntent(
         this.persona.baseIntent,
         obs,
@@ -54,15 +61,18 @@ export class EnemyController implements FighterController {
       );
     }
 
-    // Tactician (~15 Hz): re-score the deck under the current intent.
-    if (obs.tick === 1 || obs.tick % tacEvery === 0 || this.chosen === null) {
+    // Tactician (~15 Hz): re-score the deck under the current intent, biased
+    // away from the moves it just used so it rotates its kit.
+    if (this.frame === 1 || this.frame % tacEvery === 0 || this.chosen === null) {
       this.chosen = chooseMove(
         obs,
         this.intent,
         this.persona.bias,
         this.persona.difficulty,
         rng,
+        this.recent,
       );
+      if (this.chosen) this.recent = [this.chosen.move.id, ...this.recent].slice(0, 3);
     }
 
     // Executor (per frame): footwork or commit.

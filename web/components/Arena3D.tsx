@@ -17,11 +17,16 @@ type FighterState = {
   name: string;
   hp: number;
   balance: number;
+  /** 0-100; spent to attack, regenerates while idle. */
+  stamina: number;
   x: number;
   attacking: boolean;
   attackSide: PlayerSide | null;
   attackStart: number;
   hitFlash: number;
+  /** Date.now() ms until which this fighter is recovering and cannot act. */
+  recoverUntil: number;
+  stance: "stable" | "recovering" | "knockdown";
 };
 
 type ArenaMove = {
@@ -235,13 +240,33 @@ function setRobotPose(
   if (torso) torso.rotation.z = -punch * 0.12 * direction;
 }
 
+// Damage scales hard with power, so a heavy move is a real payoff — picking the
+// right moment to land one matters more than throwing the cheapest thing.
 function damageFor(move: ArenaMove) {
-  return Math.round(8 + move.power * 0.22 + move.speed * 0.18);
+  return Math.round(3 + move.power * 0.5 + move.speed * 0.05);
 }
 
+// Heavy/high-risk moves break balance much more — they're how you set up a
+// stagger and open a punish, the reward that justifies their cost.
 function balanceDamageFor(move: ArenaMove) {
-  return Math.round(8 + move.balanceRisk * 0.22 + move.speed * 0.08);
+  return Math.round(5 + move.balanceRisk * 0.25 + move.power * 0.12);
 }
+
+// Stamina is a tight budget: ~3 moves empties the bar and forces a rest. Power
+// costs the most, so you can't lean on your big move — spend it deliberately.
+function staminaCostFor(move: ArenaMove) {
+  return Math.round(18 + move.power * 0.5 + move.speed * 0.1);
+}
+
+// How long the attacker is locked in recovery (ms) — the window an opponent
+// punishes into. Heavy, low-recovery moves leave you exposed much longer, so
+// whiffing one at the wrong time loses the exchange.
+function recoveryMsFor(move: ArenaMove) {
+  return Math.round(320 + (100 - move.recovery) * 4.5 + move.power * 3);
+}
+
+// Below this you're too winded to act and must rest (visible breather windows).
+const MIN_STAMINA_TO_ACT = 30;
 
 export function Arena3D() {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -260,21 +285,27 @@ export function Arena3D() {
     name: "Player 1",
     hp: 100,
     balance: 100,
+    stamina: 100,
     x: -1.15,
     attacking: false,
     attackSide: null,
     attackStart: 0,
     hitFlash: 0,
+    recoverUntil: 0,
+    stance: "stable",
   });
   const [right, setRight] = useState<FighterState>({
     name: "Player 2",
     hp: 100,
     balance: 100,
+    stamina: 100,
     x: 1.15,
     attacking: false,
     attackSide: null,
     attackStart: 0,
     hitFlash: 0,
+    recoverUntil: 0,
+    stance: "stable",
   });
   const [log, setLog] = useState<string[]>([
     "Choose a move. Each robot can play robot-skill cards like Street Fighter specials.",
@@ -379,25 +410,40 @@ export function Arena3D() {
     const rng = makeRng(0xa1 + personaId.length);
     let tick = 0;
     const timer = setInterval(() => {
+      const now = Date.now();
       const ls = leftStateRef.current;
       const rs = rightStateRef.current;
       const deck = deckCardsRef.current;
       if (!ls || !rs || !deck.length) return;
       if (ls.hp <= 0 || rs.hp <= 0) return; // match decided
-      if (rs.attacking) return; // mid-animation
+      // Recovering from its own move, or too winded — rest and regenerate. This
+      // paces the AI instead of letting it spam, and lets stamina drive variety.
+      if (now < rs.recoverUntil || rs.stamina < MIN_STAMINA_TO_ACT) return;
       tick += 1;
+      // The opponent's stance/cooldown is real now, so the tactician sees a live
+      // world: it whiff-punishes when the player is recovering and backs off when
+      // its own balance/stamina is low — different decisions on different beats.
       const action = controller.decide(
         {
           tick,
-          rateHz: 25,
-          self: { hp: rs.hp, x: rs.x, balance: rs.balance, stamina: 100, cooldown: 0, stance: "stable" },
+          // The UI throttles decide() to off-cooldown beats, so each call is one
+          // executor frame — 15 Hz makes the tactician re-score every beat.
+          rateHz: 15,
+          self: {
+            hp: rs.hp,
+            x: rs.x,
+            balance: rs.balance,
+            stamina: rs.stamina,
+            cooldown: now < rs.recoverUntil ? 1 : 0,
+            stance: rs.stance,
+          },
           opponent: {
             hp: ls.hp,
             x: ls.x,
             balance: ls.balance,
-            stamina: 100,
-            cooldown: ls.attacking ? 1 : 0,
-            stance: ls.attacking ? "extended" : "stable",
+            stamina: ls.stamina,
+            cooldown: now < ls.recoverUntil ? 1 : 0,
+            stance: ls.attacking ? "extended" : ls.stance,
           },
           deck,
           // The arena UI has no footwork/spacing mechanic — move buttons always
@@ -412,7 +458,9 @@ export function Arena3D() {
       // committed move as the action and let other beats pass as spacing.
       if (action.kind === "move") {
         const am = usableMoves.find((m) => m.id === action.moveId) ?? usableMoves[0];
-        if (am) playMoveRef.current?.("right", am);
+        // Only throw if it can actually afford this move; otherwise rest this
+        // beat to regenerate (the breather is part of the rhythm).
+        if (am && rs.stamina >= staminaCostFor(am)) playMoveRef.current?.("right", am);
       }
     }, 260);
     return () => clearInterval(timer);
@@ -538,70 +586,129 @@ export function Arena3D() {
   }, []);
 
   useEffect(() => {
+    const decay = (p: FighterState): FighterState => {
+      const now = Date.now();
+      const recovering = now < p.recoverUntil;
+      return {
+        ...p,
+        hitFlash: Math.max(0, p.hitFlash - 0.08),
+        attacking: p.attacking && now - p.attackStart < 520,
+        attackSide: now - p.attackStart < 520 ? p.attackSide : null,
+        // Slow stamina regen so the ~3-move budget actually bites and forces
+        // rest windows; balance returns faster once out of stagger.
+        stamina: clamp(p.stamina + (recovering ? 0.4 : 1.0)),
+        balance: clamp(p.balance + (recovering ? 0.4 : 1.1)),
+        stance: recovering ? p.stance : "stable",
+      };
+    };
     const timer = setInterval(() => {
-      setLeft((p) => ({
-        ...p,
-        hitFlash: Math.max(0, p.hitFlash - 0.08),
-        attacking: p.attacking && Date.now() - p.attackStart < 520,
-        attackSide: Date.now() - p.attackStart < 520 ? p.attackSide : null,
-      }));
-      setRight((p) => ({
-        ...p,
-        hitFlash: Math.max(0, p.hitFlash - 0.08),
-        attacking: p.attacking && Date.now() - p.attackStart < 520,
-        attackSide: Date.now() - p.attackStart < 520 ? p.attackSide : null,
-      }));
+      setLeft(decay);
+      setRight(decay);
     }, 40);
     return () => clearInterval(timer);
   }, []);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
+    const now = Date.now();
     const ls = leftStateRef.current ?? left;
     const rs = rightStateRef.current ?? right;
     if (ls.hp <= 0 || rs.hp <= 0) return;
 
-    const dmg = damageFor(move);
-    const bal = balanceDamageFor(move);
+    const attacker = side === "left" ? ls : rs;
+    const defenderState = side === "left" ? rs : ls;
+    const cost = staminaCostFor(move);
+    // Can't act while recovering or too winded — this is what stops the spam.
+    if (now < attacker.recoverUntil || attacker.stamina < cost) return;
+
+    // Counter hit: striking an opponent who is mid-move or recovering lands
+    // harder. This is what makes timing (and the enemy's whiff-punish) matter.
+    const defenderBusy = now < defenderState.recoverUntil || defenderState.attacking;
+    const dmg = Math.round(damageFor(move) * (defenderBusy ? 1.6 : 1));
+    const bal = Math.round(balanceDamageFor(move) * (defenderBusy ? 1.35 : 1));
     const knock = 0.18 + move.speed / 500;
+    const recoverMs = recoveryMsFor(move);
     const attackerName = side === "left" ? left.name : right.name;
     const defenderName = side === "left" ? right.name : left.name;
 
+    const applyAttacker = (p: FighterState): FighterState => ({
+      ...p,
+      attacking: true,
+      attackSide: side,
+      attackStart: now,
+      stamina: clamp(p.stamina - cost),
+      recoverUntil: now + recoverMs,
+      stance: "recovering",
+    });
+    const applyDefender =
+      (dir: 1 | -1) =>
+      (p: FighterState): FighterState => {
+        const newBalance = clamp(p.balance - bal);
+        const hardStagger = newBalance < 12;
+        const staggered = newBalance < 35;
+        // Getting hit interrupts you: a stagger locks recovery (and breaks any
+        // attack you were winding up), so trades have real consequences.
+        const stunMs = hardStagger ? 950 : staggered ? 620 : 150;
+        return {
+          ...p,
+          hp: clamp(p.hp - dmg),
+          balance: newBalance,
+          x: dir === 1 ? Math.min(1.55, p.x + knock) : Math.max(-1.55, p.x - knock),
+          hitFlash: 1,
+          recoverUntil: Math.max(p.recoverUntil, now + stunMs),
+          stance: staggered ? "knockdown" : "recovering",
+        };
+      };
+
     if (side === "left") {
-      setLeft((p) => ({ ...p, attacking: true, attackSide: "left", attackStart: Date.now() }));
-      setRight((p) => ({
-        ...p,
-        hp: clamp(p.hp - dmg),
-        balance: clamp(p.balance - bal),
-        x: Math.min(1.55, p.x + knock),
-        hitFlash: 1,
-      }));
+      setLeft(applyAttacker);
+      setRight(applyDefender(1));
     } else {
-      setRight((p) => ({ ...p, attacking: true, attackSide: "right", attackStart: Date.now() }));
-      setLeft((p) => ({
-        ...p,
-        hp: clamp(p.hp - dmg),
-        balance: clamp(p.balance - bal),
-        x: Math.max(-1.55, p.x - knock),
-        hitFlash: 1,
-      }));
+      setRight(applyAttacker);
+      setLeft(applyDefender(-1));
     }
 
-    const line = battleCall(attackerName, defenderName, move, dmg);
+    const counterTag = defenderBusy ? " (counter!)" : "";
+    const line = battleCall(attackerName, defenderName, move, dmg) + counterTag;
     setLog((prev) => [line, ...prev.slice(0, 4)]);
-    void announcer.speak(line);
+    void announcer.speak(battleCall(attackerName, defenderName, move, dmg));
   }
   playMoveRef.current = playMove;
 
   function reset() {
     koSpokenRef.current = false;
-    setLeft((p) => ({ ...p, hp: 100, balance: 100, x: -1.15, hitFlash: 0 }));
-    setRight((p) => ({ ...p, hp: 100, balance: 100, x: 1.15, hitFlash: 0 }));
+    setLeft((p) => ({
+      ...p,
+      hp: 100,
+      balance: 100,
+      stamina: 100,
+      x: -1.15,
+      hitFlash: 0,
+      recoverUntil: 0,
+      stance: "stable",
+    }));
+    setRight((p) => ({
+      ...p,
+      hp: 100,
+      balance: 100,
+      stamina: 100,
+      x: 1.15,
+      hitFlash: 0,
+      recoverUntil: 0,
+      stance: "stable",
+    }));
     const line = resetCall();
     setLog([line]);
     void announcer.speak(line);
   }
 
   const winner = left.hp <= 0 ? right.name : right.hp <= 0 ? left.name : null;
+  // Re-evaluated every render (the 40ms decay tick re-renders), so buttons grey
+  // out while a fighter is staggered/recovering or too winded to act.
+  const renderNow = Date.now();
+  const leftBusy = renderNow < left.recoverUntil || left.stamina < MIN_STAMINA_TO_ACT;
+  const rightBusy = renderNow < right.recoverUntil || right.stamina < MIN_STAMINA_TO_ACT;
+  // Player 2 is auto-piloted while a persona is selected.
+  const rightIsAI = personaId !== "";
 
   useEffect(() => {
     if (!winner || koSpokenRef.current) return;
@@ -666,13 +773,27 @@ export function Arena3D() {
         </div>
 
         <div className="grid gap-3 p-4 md:grid-cols-[1fr_240px_1fr]">
-          <HealthPanel name={left.name} hp={left.hp} balance={left.balance} accent="#3dd68c" />
+          <HealthPanel
+            name={left.name}
+            hp={left.hp}
+            balance={left.balance}
+            stamina={left.stamina}
+            stance={left.stance}
+            accent="#3dd68c"
+          />
           <div className="grid place-items-center text-center">
             <div className="rounded-full border border-[#2a2a3d] bg-black/30 px-5 py-2 text-sm font-bold">
               {winner ? `${winner} WINS` : "VS"}
             </div>
           </div>
-          <HealthPanel name={right.name} hp={right.hp} balance={right.balance} accent="#ff5c5c" />
+          <HealthPanel
+            name={right.name}
+            hp={right.hp}
+            balance={right.balance}
+            stamina={right.stamina}
+            stance={right.stance}
+            accent="#ff5c5c"
+          />
         </div>
 
         <div className="relative">
@@ -696,14 +817,14 @@ export function Arena3D() {
           side="left"
           moves={usableMoves}
           onPlay={playMove}
-          disabled={!!winner}
+          disabled={!!winner || leftBusy}
         />
         <MoveControls
-          title="Player 2 moves"
+          title={rightIsAI ? `Player 2 moves (${right.name} AI)` : "Player 2 moves"}
           side="right"
           moves={usableMoves}
           onPlay={playMove}
-          disabled={!!winner}
+          disabled={!!winner || rightBusy}
         />
       </div>
 
@@ -727,11 +848,15 @@ function HealthPanel({
   name,
   hp,
   balance,
+  stamina,
+  stance,
   accent,
 }: {
   name: string;
   hp: number;
   balance: number;
+  stamina: number;
+  stance: FighterState["stance"];
   accent: string;
 }) {
   return (
@@ -743,9 +868,18 @@ function HealthPanel({
       <Bar value={hp} color={accent} />
       <div className="mt-2 flex items-center justify-between text-xs text-[#8888a0]">
         <span>Balance</span>
-        <span>{Math.round(balance)}</span>
+        {stance === "knockdown" ? (
+          <span className="font-semibold text-[#ff5c5c]">STAGGERED</span>
+        ) : (
+          <span>{Math.round(balance)}</span>
+        )}
       </div>
       <Bar value={balance} color="#f5a623" small />
+      <div className="mt-2 flex items-center justify-between text-xs text-[#8888a0]">
+        <span>Stamina</span>
+        <span>{Math.round(stamina)}</span>
+      </div>
+      <Bar value={stamina} color="#5cc8ff" small />
     </div>
   );
 }

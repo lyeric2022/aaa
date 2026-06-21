@@ -157,14 +157,25 @@ export function chooseMove(
   bias: BiasWeights,
   difficulty: DifficultyConfig,
   rng: Rng,
+  /** Recently committed move ids (most recent first) — penalized to avoid spam. */
+  recentMoveIds: readonly string[] = [],
 ): ScoredMove | null {
   if (!obs.deck.length) return null;
   const scored: ScoredMove[] = obs.deck
-    .map((move) => ({
-      move,
-      utility: moveUtility(move, obs, intent, bias, difficulty, rng),
-      inRange: obs.range <= movePhysics(move).range,
-    }))
+    .map((move) => {
+      let utility = moveUtility(move, obs, intent, bias, difficulty, rng);
+      // Anti-self-repeat: discourage throwing the same move just used. Decays
+      // with how long ago it was used, so the enemy rotates its kit instead of
+      // leaning on a single best move every beat.
+      const recency = recentMoveIds.indexOf(move.id);
+      if (recency === 0) utility -= 0.7;
+      else if (recency === 1) utility -= 0.35;
+      return {
+        move,
+        utility,
+        inRange: obs.range <= movePhysics(move).range,
+      };
+    })
     .sort((a, b) => b.utility - a.utility);
 
   // Suboptimal play: sometimes pick the 2nd/3rd-best on purpose.
