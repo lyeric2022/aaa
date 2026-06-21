@@ -5,6 +5,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import URDFLoader from "urdf-loader";
 import { G1_MUJOCO_JOINT_NAMES } from "@/lib/g1Motion";
+import { applyCameraFrame } from "@/lib/cameraFrame";
+import { useCameraDebug } from "@/lib/useCameraDebug";
+import { CameraDebugPanel } from "@/components/CameraDebugPanel";
 
 type Trajectory = {
   fps: number;
@@ -81,6 +84,8 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [error, setError] = useState("");
   const [isPlaying, setIsPlaying] = useState(true);
+  const { frame: cameraFrame, defaultFrame: cameraDefault, syncFromScene, resetToDefault } =
+    useCameraDebug("replay");
 
   useEffect(() => {
     fetch(`/api/moves/${moveId}/trajectory`)
@@ -109,8 +114,6 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
       0.1,
       100,
     );
-    camera.position.set(1.15, 1.25, 5.6);
-    camera.lookAt(0, 0.95, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(host.clientWidth, 520);
@@ -121,8 +124,8 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
+    applyCameraFrame(camera, controls, cameraDefault);
     controls.enableDamping = true;
-    controls.target.set(0, 0.95, 0);
     controls.minDistance = 2.4;
     controls.maxDistance = 8;
 
@@ -153,6 +156,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
     scene.add(floor);
 
     const robot = new THREE.Group();
+    robot.rotation.y = (3 * Math.PI) / 2;
     scene.add(robot);
     addG1UrdfSkin(robot);
 
@@ -177,6 +181,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
 
       applyFrameToUrdf(robot, activeTrajectory.frames[frameRef.current]);
       controls.update();
+      syncFromScene(camera, controls);
       renderer.render(scene, camera);
       setFrameIndex(frameRef.current);
     }
@@ -198,7 +203,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
       renderer.dispose();
       host.removeChild(renderer.domElement);
     };
-  }, [trajectory]);
+  }, [cameraDefault, syncFromScene, trajectory]);
 
   if (error) {
     return (
@@ -217,6 +222,13 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
           </div>
         )}
         <div ref={hostRef} className="h-[520px]" />
+        <CameraDebugPanel
+          label="Replay camera"
+          frame={cameraFrame}
+          defaultFrame={cameraDefault}
+          onReset={resetToDefault}
+          defaultOpen={false}
+        />
         <div className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-black/70 to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/80 to-transparent" />
 

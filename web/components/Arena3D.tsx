@@ -10,6 +10,10 @@ import { getPersona, listPersonas, makePersonaController } from "@/lib/enemy/per
 import { makeRng } from "@/lib/enemy/rng";
 import type { FighterController } from "@/lib/enemy/types";
 import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
+import { applyCameraFrame } from "@/lib/cameraFrame";
+import { useCameraDebug } from "@/lib/useCameraDebug";
+import { CameraDebugPanel } from "@/components/CameraDebugPanel";
+import { addArenaBackground } from "@/lib/arenaEnvironment";
 
 type PlayerSide = "left" | "right";
 
@@ -204,7 +208,7 @@ function setRobotPose(
   hitFlash: number,
 ) {
   const direction = side === "left" ? 1 : -1;
-  robot.rotation.y = side === "left" ? 0 : -Math.PI / 2;
+  robot.rotation.y = side === "left" ? 0 : Math.PI;
   robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
 
   const rightUpper = robot.getObjectByName("rightUpperArm");
@@ -313,6 +317,8 @@ export function Arena3D() {
   const [announcerOn, setAnnouncerOn] = useState(true);
   const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
   const koSpokenRef = useRef(false);
+  const { frame: cameraFrame, defaultFrame: cameraDefault, syncFromScene, resetToDefault } =
+    useCameraDebug("arena");
 
   useEffect(() => {
     leftStateRef.current = left;
@@ -470,19 +476,19 @@ export function Arena3D() {
     if (!hostRef.current) return;
     const host = hostRef.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#07070d");
+    addArenaBackground(scene);
 
     const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
-    camera.position.set(0, 1.85, 4.35);
-    camera.lookAt(0, 1.0, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(host.clientWidth, 560);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0, 1.05, 0);
+    applyCameraFrame(camera, controls, cameraDefault);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = true;
@@ -494,6 +500,8 @@ export function Arena3D() {
     scene.add(new THREE.AmbientLight("#ffffff", 1.1));
     const key = new THREE.DirectionalLight("#ffffff", 2.4);
     key.position.set(0, 5, 4);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
     scene.add(key);
     const magenta = new THREE.DirectionalLight("#7c5cff", 2);
     magenta.position.set(-3, 2, 1);
@@ -501,14 +509,6 @@ export function Arena3D() {
     const green = new THREE.DirectionalLight("#3dd68c", 1.8);
     green.position.set(3, 2, 1);
     scene.add(green);
-
-    const floor = new THREE.Mesh(
-      new THREE.CylinderGeometry(2.4, 2.4, 0.08, 72),
-      createMaterial("#12131d"),
-    );
-    floor.position.y = -0.04;
-    scene.add(floor);
-    scene.add(new THREE.GridHelper(5, 18, "#343055", "#171729"));
 
     const leftBot = makeRobot("#3dd68c");
     const rightBot = makeRobot("#ff5c5c");
@@ -563,6 +563,7 @@ export function Arena3D() {
         rightImpact.scale.setScalar(0.6 + rightProgress * 2.2);
       }
       controls.update();
+      syncFromScene(camera, controls);
       renderer.render(scene, camera);
     };
     loop();
@@ -798,6 +799,12 @@ export function Arena3D() {
 
         <div className="relative">
           <div ref={hostRef} className="h-[560px]" />
+          <CameraDebugPanel
+            label="Arena camera"
+            frame={cameraFrame}
+            defaultFrame={cameraDefault}
+            onReset={resetToDefault}
+          />
           <div className="absolute left-4 top-4 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
             Drag to rotate · scroll/pinch to zoom · right-drag to pan
           </div>
