@@ -65,6 +65,56 @@ If you see `Can't resolve '@deepgram/sdk'`, run `npm install` in `web/` first. T
 - `/arena` — 3D robot-sports duel with health bars and move playback
 - `/leaderboard` — top moves and fighters by deployability
 
+## AI opponent ("the enemy")
+
+The arena ships with a deterministic, seeded AI opponent. It satisfies the same
+per-frame controller contract as the human input handler, reuses the existing
+Move Card stats and arena loop/physics, and runs **no LLM in the frame loop**.
+
+It thinks at three internal rates (mapped onto the arena tick by an adapter):
+
+- **Strategist (~3 Hz)** — game-plan + online player-modeling (move-frequency,
+  anti-spam counter-bias, intent: `pressure` / `zone` / `counter` / `reset`).
+- **Tactician (~15 Hz)** — Utility-AI scoring of every Move Card *now* from the
+  existing stats (range fit, whiff-punish/interrupt timing, safety, intent
+  match, payoff − stamina − balance_risk − recovery) with seeded noise.
+- **Executor (per frame)** — footwork toward preferred range, else commit the
+  move via the arena's move-commit API.
+
+Difficulty knobs (`reaction_delay`, `optimal_prob`, `mistake_rate`,
+`adaptation`, `noise`) are orthogonal to style (intent). Code lives in
+`web/lib/enemy/`.
+
+### Personas
+
+`Rusher`, `Zoner`, `Counter-Puncher`, `Adapter-Boss` (`web/lib/enemy/personas.ts`).
+
+**Select one in the UI:** open `/arena` and use the **Player 2 AI** dropdown.
+Choose a persona to let it pilot Player 2; "Manual (human)" returns control.
+
+**Headless:** `POST /api/arena/fight` with `{ fighter_a, fighter_b, persona_b,
+seed }` — when `persona_b` is set, that persona drives fighter_b. `seed` makes
+the match replayable.
+
+### Evaluation harness (competition-readiness)
+
+Run a fighter's deck against the full persona pool through the **real** arena and
+get a win-rate + why-it-loses profile (and a readiness score blended with the
+existing Deployability):
+
+```bash
+curl -X POST http://localhost:3000/api/arena/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{ "fighter": "<fighter_id>", "matches": 5, "seed": 1 }'
+```
+
+### Tests
+
+```bash
+cd web
+npm test          # vitest, fully offline (seeded unit + real-arena integration)
+```
+
 ## Motion replay notes
 
 SONIC zip exports store joints in **IsaacLab/internal order** (`joint_0`…`joint_28`). The web replay and trajectory API remap that to **MuJoCo / Unitree SDK order** before driving the G1 URDF (`web/lib/g1Motion.ts`).

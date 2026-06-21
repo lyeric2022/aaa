@@ -6,6 +6,24 @@ import type {
   MoveCard,
 } from "./types";
 import { getMove } from "./storage";
+import { movePhysics } from "./arena-physics";
+import { DEFAULT_SEED, makeRng, type Rng } from "./enemy/rng";
+import type {
+  ArenaAction,
+  ArenaObservation,
+  FighterController,
+} from "./enemy/types";
+
+export interface SimulateOptions {
+  /** Seed for replayable matches (narration + decisions). */
+  seed?: number;
+  /** Per-fighter controllers. Omit a side to use the seeded-random default. */
+  controllers?: { a?: FighterController; b?: FighterController };
+  /** Max ticks before the fight is scored on remaining HP. */
+  maxTicks?: number;
+  /** Effective frame rate the controllers schedule their internal rates against. */
+  rateHz?: number;
+}
 
 const NARRATION = {
   advance: [
@@ -36,8 +54,8 @@ const NARRATION = {
   ],
 };
 
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function pick<T>(rng: Rng, arr: T[]): T {
+  return arr[Math.floor(rng.next() * arr.length)];
 }
 
 function interpolate(
@@ -64,17 +82,6 @@ function initialState(name: string, x: number): FighterPhysicsState {
     stamina: 100,
     cooldown: 0,
     stance: "stable",
-  };
-}
-
-function movePhysics(move: MoveCard) {
-  return {
-    range: 0.6 + move.stats.speed * 0.012 + move.stats.power * 0.004,
-    impact: move.stats.power * 0.55 + move.stats.speed * 0.45,
-    balanceCost: move.stats.balance_risk * 0.34 + (100 - move.stats.recovery) * 0.1,
-    recoveryTicks: Math.max(1, Math.round(1 + (100 - move.stats.recovery) / 28)),
-    staminaCost: 10 + move.stats.power * 0.08 + move.stats.speed * 0.05,
-    stability: move.stats.smoothness * 0.45 + move.stats.recovery * 0.55,
   };
 }
 
@@ -148,21 +155,37 @@ function applyAttack(
   };
 }
 
+function buildDeck(
+  moveIds: string[],
+  moveMap: Map<string, MoveCard>,
+): MoveCard[] {
+  return moveIds
+    .map((id) => moveMap.get(id))
+    .filter((m): m is MoveCard => Boolean(m));
+}
+
 export async function simulateFight(
   fighterA: Fighter,
   fighterB: Fighter,
   moveMap: Map<string, MoveCard>,
+  opts: SimulateOptions = {},
 ): Promise<FightResult> {
   const rounds: FightRound[] = [];
   const stateA = initialState(fighterA.name, -1.8);
   const stateB = initialState(fighterB.name, 1.8);
-  const maxTicks = 12;
+  const maxTicks = opts.maxTicks ?? 12;
+  const rateHz = opts.rateHz ?? 15;
+  const rng = makeRng(opts.seed ?? DEFAULT_SEED);
+  const controllerA = opts.controllers?.a;
+  const controllerB = opts.controllers?.b;
 
   for (let tick = 1; tick <= maxTicks && stateA.hp > 0 && stateB.hp > 0; tick++) {
     const aAttacks = tick % 2 === 1;
     const attackerFighter = aAttacks ? fighterA : fighterB;
     const attacker = aAttacks ? stateA : stateB;
     const defender = aAttacks ? stateB : stateA;
+    const controller = aAttacks ? controllerA : controllerB;
+    const otherController = aAttacks ? controllerB : controllerA;
 
     recover(stateA);
     recover(stateB);
@@ -175,15 +198,70 @@ export async function simulateFight(
         move_used: "recover",
         damage: 0,
         event_type: "recover",
-        narration: interpolate(pick(NARRATION.recover), { fighter: attacker.name }),
+        narration: interpolate(pick(rng, NARRATION.recover), { fighter: attacker.name }),
         hp_after: { a: stateA.hp, b: stateB.hp },
         states: { a: cloneState(stateA), b: cloneState(stateB) },
       });
       continue;
     }
 
-    const moveId = pick(attackerFighter.move_ids);
-    const move = moveMap.get(moveId);
+    const deck = buildDeck(attackerFighter.move_ids, moveMap);
+    // Per-frame controller hook — the analog of the human input handler. With
+    // no controller we fall back to the legacy (now seeded) random pick.
+    let action: ArenaAction;
+    if (controller && deck.length) {
+      const obs: ArenaObservation = {
+        tick,
+        rateHz,
+        self: attacker,
+        opponent: defender,
+        deck,
+        range: distance(attacker, defender),
+      };
+      action = controller.decide(obs, rng);
+    } else {
+      action = { kind: "move", moveId: pick(rng, attackerFighter.move_ids) };
+    }
+
+    // "wait" — take the recovery beat instead of committing.
+    if (action.kind === "wait") {
+      rounds.push({
+        round: tick,
+        attacker: attacker.name,
+        defender: defender.name,
+        move_used: "recover",
+        damage: 0,
+        event_type: "recover",
+        narration: interpolate(pick(rng, NARRATION.recover), { fighter: attacker.name }),
+        hp_after: { a: stateA.hp, b: stateB.hp },
+        states: { a: cloneState(stateA), b: cloneState(stateB) },
+      });
+      continue;
+    }
+
+    // "advance" — footwork toward the opponent (deliberate spacing).
+    if (action.kind === "advance") {
+      advance(attacker, defender);
+      rounds.push({
+        round: tick,
+        attacker: attacker.name,
+        defender: defender.name,
+        move_used: "footwork",
+        damage: 0,
+        event_type: "advance",
+        range_m: Math.round(distance(attacker, defender) * 100) / 100,
+        narration: interpolate(pick(rng, NARRATION.advance), {
+          attacker: attacker.name,
+          defender: defender.name,
+          move: "footwork",
+        }),
+        hp_after: { a: stateA.hp, b: stateB.hp },
+        states: { a: cloneState(stateA), b: cloneState(stateB) },
+      });
+      continue;
+    }
+
+    const move = moveMap.get(action.moveId);
     if (!move) continue;
 
     const physics = movePhysics(move);
@@ -197,7 +275,7 @@ export async function simulateFight(
         damage: 0,
         event_type: "advance",
         range_m: Math.round(distance(attacker, defender) * 100) / 100,
-        narration: interpolate(pick(NARRATION.advance), {
+        narration: interpolate(pick(rng, NARRATION.advance), {
           attacker: attacker.name,
           defender: defender.name,
           move: move.name,
@@ -209,9 +287,16 @@ export async function simulateFight(
     }
 
     const outcome = applyAttack(attacker, defender, move);
+    // "player committed a move" observation point — feed the opponent's brain.
+    otherController?.observeOpponentMove?.(move.id, {
+      hit: outcome.hit,
+      damage: outcome.damage,
+      knockdown: outcome.knockdown,
+      range: outcome.range,
+    });
     const eventType = outcome.knockdown ? "knockdown" : outcome.hit ? "hit" : "miss";
     const narration = interpolate(
-      pick(outcome.knockdown ? NARRATION.knockdown : outcome.hit ? NARRATION.hit : NARRATION.miss),
+      pick(rng, outcome.knockdown ? NARRATION.knockdown : outcome.hit ? NARRATION.hit : NARRATION.miss),
       {
         attacker: attacker.name,
         defender: defender.name,
@@ -249,13 +334,13 @@ export async function simulateFight(
       move_used: "finisher",
       damage: 0,
       event_type: "ko",
-      narration: interpolate(pick(NARRATION.ko), { winner, loser }),
+      narration: interpolate(pick(rng, NARRATION.ko), { winner, loser }),
       hp_after: { a: stateA.hp, b: stateB.hp },
       states: { a: cloneState(stateA), b: cloneState(stateB) },
     });
   }
 
-  return {
+  const result: FightResult = {
     fighter_a: fighterA.name,
     fighter_b: fighterB.name,
     winner,
@@ -264,6 +349,21 @@ export async function simulateFight(
     final_state: { a: cloneState(stateA), b: cloneState(stateB) },
     sim_type: "physics_aware_2d",
   };
+
+  // Between-round hook — out of the frame loop. Attach point for the future
+  // LLM meta-coach / persona-author / narrator (no LLM invoked here today).
+  controllerA?.onRoundEnd?.({
+    result,
+    selfName: fighterA.name,
+    opponentName: fighterB.name,
+  });
+  controllerB?.onRoundEnd?.({
+    result,
+    selfName: fighterB.name,
+    opponentName: fighterA.name,
+  });
+
+  return result;
 }
 
 export async function loadMovesForFighters(
