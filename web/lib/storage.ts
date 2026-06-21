@@ -58,10 +58,7 @@ export async function saveFighter(fighter: Fighter): Promise<void> {
 
 export async function getFighter(id: string): Promise<Fighter | null> {
   try {
-    const raw = await fs.readFile(
-      path.join(FIGHTERS_DIR, `${id}.json`),
-      "utf8",
-    );
+    const raw = await fs.readFile(path.join(FIGHTERS_DIR, `${id}.json`), "utf8");
     return JSON.parse(raw) as Fighter;
   } catch {
     return null;
@@ -82,54 +79,71 @@ export async function listFighters(): Promise<Fighter[]> {
   );
 }
 
-export function uploadsPath(...parts: string[]) {
-  return path.join(UPLOADS_DIR, ...parts);
+export function uploadsPath(id: string) {
+  return path.join(UPLOADS_DIR, id);
 }
 
 export function publicUploadUrl(filename: string) {
   return `/uploads/${filename}`;
 }
 
+function enrichSeededMove(record: MoveRecord, repoRoot: string): MoveRecord {
+  if (record.move_card.id !== "block") return record;
+  return {
+    ...record,
+    move_card: {
+      ...record.move_card,
+      source: "sonic_zip",
+      attack_type: "block",
+      sonic_zip_path: path.join(repoRoot, "assets/motions/block_sonic.zip"),
+      created_at: record.move_card.created_at || new Date().toISOString(),
+      coach_feedback:
+        "Hold the guard high and square the hips — low speed and high recovery make this a stable defensive option.",
+    },
+  };
+}
+
 export async function seedDemoMove(): Promise<void> {
-  const demoPath = path.join(MOVES_DIR, "ghost_jab_combo.json");
-  try {
-    await fs.access(demoPath);
-    return;
-  } catch {
-    /* seed below */
-  }
+  const repoDemoDir = path.join(process.cwd(), "..", "move_cards");
+  const repoRoot = path.join(process.cwd(), "..");
 
-  const repoDemo = path.join(
-    process.cwd(),
-    "..",
-    "move_cards",
-    "ghost_jab_combo.json",
-  );
   try {
-    const raw = await fs.readFile(repoDemo, "utf8");
-    const parsed = JSON.parse(raw) as MoveRecord;
-    await saveMove(parsed);
-
-    // Demo sparring partner for arena testing
-    const sparPath = path.join(MOVES_DIR, "ghost_counter_cross.json");
-    try {
-      await fs.access(sparPath);
-    } catch {
-      const spar = JSON.parse(JSON.stringify(parsed)) as MoveRecord;
-      spar.move_card.id = "ghost_counter_cross";
-      spar.move_card.name = "Ghost Counter Cross";
-      spar.move_card.stats = {
-        ...spar.move_card.stats,
-        speed: Math.round(spar.move_card.stats.speed * 0.88),
-        power: Math.round(spar.move_card.stats.power * 1.2),
-        balance_risk: Math.round(spar.move_card.stats.balance_risk * 0.82),
-        deployability: Math.min(100, spar.move_card.stats.deployability + 6),
-      };
-      spar.move_card.coach_feedback =
-        "Tighter guard on the cross — good power, watch the lean.";
-      await saveMove(spar);
+    const demoFiles = await fs.readdir(repoDemoDir);
+    for (const file of demoFiles.filter((f) => f.endsWith(".json"))) {
+      const id = file.replace(/\.json$/, "");
+      const dest = path.join(MOVES_DIR, `${id}.json`);
+      try {
+        await fs.access(dest);
+        continue;
+      } catch {
+        /* seed below */
+      }
+      const raw = await fs.readFile(path.join(repoDemoDir, file), "utf8");
+      const parsed = enrichSeededMove(JSON.parse(raw) as MoveRecord, repoRoot);
+      await saveMove(parsed);
     }
   } catch {
-    /* no seed file */
+    /* no seed dir */
+  }
+
+  const sparPath = path.join(MOVES_DIR, "ghost_counter_cross.json");
+  try {
+    await fs.access(sparPath);
+  } catch {
+    const ghost = await getMove("ghost_jab_combo");
+    if (!ghost) return;
+    const spar = JSON.parse(JSON.stringify(ghost)) as MoveRecord;
+    spar.move_card.id = "ghost_counter_cross";
+    spar.move_card.name = "Ghost Counter Cross";
+    spar.move_card.stats = {
+      ...spar.move_card.stats,
+      speed: Math.round(spar.move_card.stats.speed * 0.88),
+      power: Math.round(spar.move_card.stats.power * 1.2),
+      balance_risk: Math.round(spar.move_card.stats.balance_risk * 0.82),
+      deployability: Math.min(100, spar.move_card.stats.deployability + 6),
+    };
+    spar.move_card.coach_feedback =
+      "Tighter guard on the cross — good power, watch the lean.";
+    await saveMove(spar);
   }
 }

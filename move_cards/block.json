@@ -1,0 +1,38 @@
+{
+  "stats": {
+    "duration_sec": 1.94,
+    "fps": 50.0,
+    "frame_count": 97,
+    "joint_count": 29,
+    "peak_velocity": 9.5625,
+    "mean_velocity": 0.4609,
+    "smoothness": 98.0,
+    "jerk_score": 100.0,
+    "extension_risk": 57.7,
+    "recovery_score": 99.9,
+    "deploy_score": 69.1,
+    "verdict": "needs_edits"
+  },
+  "move_card": {
+    "id": "block",
+    "name": "Block",
+    "source": "ultimate_bots_studio",
+    "attack_type": "block",
+    "studio_sonic_validated": true,
+    "stats": {
+      "speed": 21.0375,
+      "power": 16.1315,
+      "smoothness": 98.0,
+      "balance_risk": 58.105,
+      "recovery": 99.9,
+      "deployability": 69.1
+    },
+    "verdict": "needs_edits",
+    "coach_feedback": "Hold the guard high and square the hips — low speed and high recovery make this a stable defensive option.",
+    "pipeline": {
+      "data": "human recording + studio retarget",
+      "eval": "joint trajectory heuristics",
+      "deploy": "sonic zip validated in studio simulate"
+    }
+  }
+}

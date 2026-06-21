@@ -16,6 +16,7 @@ import {
   advanceFooting,
   angleLerp,
   applyMove,
+  attackAnimMs,
   BOUND_X,
   BOUND_Z,
   clampToBox,
@@ -31,11 +32,12 @@ import {
   type MoveAnim,
   type PlayerSide,
 } from "@/lib/arenaCombat";
-import { applyCameraFrame } from "@/lib/cameraFrame";
-import { useCameraDebug } from "@/lib/useCameraDebug";
+import { applyG1JointFrame } from "@/lib/g1Motion";
+import { applyCameraFrame, CAMERA_DEFAULTS } from "@/lib/cameraFrame";
 import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
-import { CameraDebugPanel } from "@/components/CameraDebugPanel";
 import { addArenaBackground, applyRopeContacts } from "@/lib/arenaEnvironment";
+
+const ARENA_CAMERA_DEFAULT = CAMERA_DEFAULTS.arena;
 
 function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
@@ -348,6 +350,12 @@ function strideOffsets(phase: number): JointMap {
   };
 }
 
+function attackProgressFor(state: FighterState): number {
+  if (!state.attackSide) return 0;
+  const duration = attackAnimMs(state.attackMoveId);
+  return Math.min(1, (Date.now() - state.attackStart) / duration);
+}
+
 function setRobotPose(
   robot: THREE.Group,
   attackProgress: number,
@@ -355,7 +363,22 @@ function setRobotPose(
   anim: MoveAnim | null,
   walkPhase: number,
   walkIntensity: number,
+  attackMoveId: string | null,
+  blockFrames: number[][] | null,
 ) {
+  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
+  if (attackMoveId === "block" && blockFrames?.length && urdf?.setJointValue) {
+    const frameIdx = Math.min(
+      blockFrames.length - 1,
+      Math.floor(attackProgress * blockFrames.length),
+    );
+    applyG1JointFrame(urdf.setJointValue.bind(urdf), blockFrames[frameIdx]!);
+    robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
+    robot.scale.setScalar(1);
+    setPlaceholderVisible(robot, false);
+    return;
+  }
+
   const punch = anim ? Math.sin(Math.min(1, attackProgress) * Math.PI) : 0;
   // Walking is suppressed while a strike is at full extension so the swing
   // reads cleanly, then blends back in as the fighter returns to neutral.
@@ -367,7 +390,6 @@ function setRobotPose(
   robot.position.y = flashBob - crouch + bob;
   robot.scale.setScalar(1 + punch * 0.04);
 
-  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
   if (urdf?.setJointValue) {
     // Both fighters now rotate to face their opponent, so the pose is authored
     // once in the local frame (forward = local +x) with no left/right mirror.
@@ -427,10 +449,10 @@ export function Arena3D() {
   const multiplayer = useArenaMultiplayer({ enabled: onlineMode, roomId, playerSide });
 
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const resizeSceneRef = useRef<(() => void) | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
   const rightRobot = useRef<THREE.Group | null>(null);
-  const leftImpactRef = useRef<THREE.Mesh | null>(null);
-  const rightImpactRef = useRef<THREE.Mesh | null>(null);
   const leftStateRef = useRef<FighterState | null>(null);
   const rightStateRef = useRef<FighterState | null>(null);
   const deckCardsRef = useRef<MoveCard[]>([]);
@@ -450,8 +472,39 @@ export function Arena3D() {
   const [announcerOn, setAnnouncerOn] = useState(true);
   const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
   const koSpokenRef = useRef(false);
-  const { frame: cameraFrame, defaultFrame: cameraDefault, syncFromScene, resetToDefault } =
-    useCameraDebug("arena");
+  const blockTrajectoryRef = useRef<number[][] | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === viewportRef.current);
+      resizeSceneRef.current?.();
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  function toggleFullscreen() {
+    if (!viewportRef.current) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      return;
+    }
+    void viewportRef.current.requestFullscreen();
+  }
+
+  useEffect(() => {
+    resizeSceneRef.current?.();
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    fetch("/api/moves/block/trajectory")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { frames?: number[][] } | null) => {
+        if (data?.frames?.length) blockTrajectoryRef.current = data.frames;
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     leftStateRef.current = left;
@@ -545,19 +598,10 @@ export function Arena3D() {
       });
   }, []);
 
-  // Always give each fighter a varied kit: the player's real scored moves
-  // first, then arena archetypes to fill out a 4-slot loadout.
+  // Real scored moves only — no synthetic filler once motions are loaded.
   const usableMoves = useMemo<ArenaMove[]>(() => {
-    const roster: ArenaMove[] = [];
-    const seen = new Set<string>();
-    for (const move of [...moves, ...ARENA_BASICS]) {
-      const key = move.name.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      roster.push(move);
-      if (roster.length >= 4) break;
-    }
-    return roster;
+    if (moves.length > 0) return moves.slice(0, 4);
+    return ARENA_BASICS.slice(0, 4);
   }, [moves]);
 
   // Full MoveCards for the enemy brain, aligned to the displayed roster (it
@@ -687,7 +731,7 @@ export function Arena3D() {
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    applyCameraFrame(camera, controls, cameraDefault);
+    applyCameraFrame(camera, controls, ARENA_CAMERA_DEFAULT);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = true;
@@ -719,39 +763,25 @@ export function Arena3D() {
     leftRobot.current = leftBot;
     rightRobot.current = rightBot;
 
-    const impactGeo = new THREE.SphereGeometry(0.12, 20, 20);
-    const leftImpact = new THREE.Mesh(impactGeo, createMaterial("#3dd68c", "#3dd68c"));
-    const rightImpact = new THREE.Mesh(impactGeo, createMaterial("#ff5c5c", "#ff5c5c"));
-    leftImpact.visible = false;
-    rightImpact.visible = false;
-    scene.add(leftImpact, rightImpact);
-    leftImpactRef.current = leftImpact;
-    rightImpactRef.current = rightImpact;
-
     let raf = 0;
     let lastT = 0;
     const clock = new THREE.Clock();
+    const blockFramesRef = blockTrajectoryRef;
 
-    // Drives one fighter's transform + pose each frame, returning its attack
-    // progress and forward vector so the caller can place the impact spark.
     const driveBot = (
       bot: THREE.Group,
       state: FighterState,
       attackMatches: boolean,
       dt: number,
     ) => {
-      const progress = attackMatches
-        ? Math.min(1, (Date.now() - state.attackStart) / 520)
-        : 0;
+      const progress = attackMatches ? attackProgressFor(state) : 0;
 
-      // Turn smoothly toward the authoritative facing (locked mid-swing).
       bot.rotation.y = angleLerp(bot.rotation.y, state.facing, 0.35);
       const fwdX = Math.cos(bot.rotation.y);
       const fwdZ = -Math.sin(bot.rotation.y);
 
-      // Lunge forward along the current facing during a strike, clamped to the
-      // ring so the visual body never crosses the ropes even at peak lunge.
-      const lunge = progress * (1 - progress) * 1.5;
+      const lunge =
+        state.attackMoveId === "block" ? 0 : progress * (1 - progress) * 1.5;
       const [targetX, targetZ] = clampToBox(
         state.x + fwdX * lunge,
         state.z + fwdZ * lunge,
@@ -761,29 +791,22 @@ export function Arena3D() {
       bot.position.x = THREE.MathUtils.lerp(bot.position.x, targetX, 0.3);
       bot.position.z = THREE.MathUtils.lerp(bot.position.z, targetZ, 0.3);
 
-      // Walk cycle: advance phase only while actually moving so strides flow
-      // with held keys. Intensity eases in/out for a smooth start and stop.
       const ud = bot.userData;
       const walkInt = THREE.MathUtils.lerp((ud.walkInt as number) ?? 0, state.walk, 0.18);
       ud.walkInt = walkInt;
       const phase = ((ud.walkPhase as number) ?? 0) + dt * STRIDE_FREQ * walkInt;
       ud.walkPhase = phase;
 
-      setRobotPose(bot, progress, state.hitFlash, state.attackAnim, phase, walkInt);
-      return { progress, fwdX, fwdZ };
-    };
-
-    const placeImpact = (
-      impact: THREE.Mesh | null,
-      bot: THREE.Group,
-      fwdX: number,
-      fwdZ: number,
-      progress: number,
-    ) => {
-      if (!impact) return;
-      impact.visible = progress > 0.2 && progress < 0.82;
-      impact.position.set(bot.position.x + fwdX * 0.78, 1.35, bot.position.z + fwdZ * 0.78);
-      impact.scale.setScalar(0.6 + progress * 2.2);
+      setRobotPose(
+        bot,
+        progress,
+        state.hitFlash,
+        state.attackAnim,
+        phase,
+        walkInt,
+        state.attackMoveId,
+        blockFramesRef.current,
+      );
     };
 
     const loop = () => {
@@ -794,30 +817,31 @@ export function Arena3D() {
       const leftState = leftStateRef.current ?? left;
       const rightState = rightStateRef.current ?? right;
 
-      const l = driveBot(leftBot, leftState, leftState.attackSide === "left", dt);
-      const r = driveBot(rightBot, rightState, rightState.attackSide === "right", dt);
-      placeImpact(leftImpact, leftBot, l.fwdX, l.fwdZ, l.progress);
-      placeImpact(rightImpact, rightBot, r.fwdX, r.fwdZ, r.progress);
+      driveBot(leftBot, leftState, leftState.attackSide === "left", dt);
+      driveBot(rightBot, rightState, rightState.attackSide === "right", dt);
 
-      // Bow the ropes wherever a fighter is leaning on the ring.
       applyRopeContacts(env.ropes, [leftBot.position, rightBot.position]);
 
       controls.update();
-      syncFromScene(camera, controls);
       renderer.render(scene, camera);
     };
     loop();
 
     const resize = () => {
       if (!hostRef.current) return;
-      camera.aspect = hostRef.current.clientWidth / 560;
+      const width = hostRef.current.clientWidth;
+      const height = hostRef.current.clientHeight || 560;
+      camera.aspect = width / height;
       camera.updateProjectionMatrix();
-      renderer.setSize(hostRef.current.clientWidth, 560);
+      renderer.setSize(width, height);
     };
+    resizeSceneRef.current = resize;
+    resize();
     window.addEventListener("resize", resize);
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
+      resizeSceneRef.current = null;
       controls.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);
@@ -902,6 +926,40 @@ export function Arena3D() {
     void announcer.speak(result.logLine.replace(/ \(counter!\)$/, ""));
   }
   playMoveRef.current = playMove;
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const slot = Number(e.key);
+      if (!Number.isInteger(slot) || slot < 1 || slot > 4) return;
+
+      const move = usableMoves[slot - 1];
+      if (!move) return;
+
+      const ls = leftStateRef.current;
+      const rs = rightStateRef.current;
+      if (!ls || !rs || ls.hp <= 0 || rs.hp <= 0) return;
+
+      const now = Date.now();
+      const self = playerSide === "left" ? ls : rs;
+      if (now < self.recoverUntil || self.stamina < MIN_STAMINA_TO_ACT) return;
+
+      e.preventDefault();
+      playMoveRef.current?.(playerSide, move);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [usableMoves, playerSide]);
 
   function reset() {
     if (multiplayer.isMultiplayer) {
@@ -1046,14 +1104,19 @@ export function Arena3D() {
           />
         </div>
 
-        <div className="relative">
-          <div ref={hostRef} className="h-[560px]" />
-          <CameraDebugPanel
-            label="Arena camera"
-            frame={cameraFrame}
-            defaultFrame={cameraDefault}
-            onReset={resetToDefault}
-          />
+        <div
+          ref={viewportRef}
+          className="relative bg-[#060707] [&:fullscreen]:h-full [&:fullscreen]:w-full"
+        >
+          <div ref={hostRef} className="h-[560px] [&:fullscreen]:h-full" />
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="absolute right-4 top-4 z-10 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-1.5 text-xs text-[#e8e8f0] backdrop-blur transition hover:border-[#7c5cff]"
+            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          >
+            {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+          </button>
           <div className="absolute left-4 top-4 space-y-1 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
             <div>Drag to rotate · scroll/pinch to zoom · right-drag to pan</div>
             <div className="text-[#8888a0]">
@@ -1063,6 +1126,7 @@ export function Arena3D() {
               ) : (
                 <> · <span className="text-[#ff5c5c]">P2 arrows</span></>
               )}{" "}
+              · strikes <span className="text-[#a78bfa]">1–{Math.min(usableMoves.length, 4)}</span>
               · circle in to land, flank to dodge
             </div>
           </div>
@@ -1179,20 +1243,28 @@ function MoveControls({
 }) {
   return (
     <div className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-4">
-      <p className="mb-3 text-sm font-semibold">{title}</p>
+      <p className="mb-3 text-sm font-semibold">
+        {title}
+        <span className="ml-2 font-normal text-[#8888a0]">· keys 1–{Math.min(moves.length, 4)}</span>
+      </p>
       <div className="grid gap-2">
-        {moves.slice(0, 4).map((move) => (
+        {moves.slice(0, 4).map((move, index) => (
           <button
             key={`${side}-${move.id}`}
             onClick={() => onPlay(side, move)}
             disabled={disabled}
-            className="rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
+            className="flex items-start gap-3 rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
           >
-            <div className="font-medium">{move.name}</div>
-            <div className="mt-1 text-xs text-[#8888a0]">
-              speed {Math.round(move.speed)} · power {Math.round(move.power)} · risk{" "}
-              {Math.round(move.balanceRisk)}
-            </div>
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#7c5cff]/40 bg-[#7c5cff]/10 font-mono text-sm font-bold text-[#a78bfa]">
+              {index + 1}
+            </span>
+            <span className="min-w-0">
+              <div className="font-medium">{move.name}</div>
+              <div className="mt-1 text-xs text-[#8888a0]">
+                speed {Math.round(move.speed)} · power {Math.round(move.power)} · risk{" "}
+                {Math.round(move.balanceRisk)}
+              </div>
+            </span>
           </button>
         ))}
       </div>
