@@ -22,13 +22,15 @@ export function CameraDebugPanel({
   frame,
   defaultFrame,
   onReset,
+  defaultOpen = true,
 }: {
   label: string;
   frame: CameraFrame;
   defaultFrame: CameraFrame;
   onReset: () => void;
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(defaultOpen);
   const [copied, setCopied] = useState(false);
 
   async function copyFrame() {

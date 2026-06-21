@@ -156,6 +156,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
     scene.add(floor);
 
     const robot = new THREE.Group();
+    robot.rotation.y = (3 * Math.PI) / 2;
     scene.add(robot);
     addG1UrdfSkin(robot);
 
@@ -226,6 +227,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
           frame={cameraFrame}
           defaultFrame={cameraDefault}
           onReset={resetToDefault}
+          defaultOpen={false}
         />
         <div className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-black/70 to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/80 to-transparent" />

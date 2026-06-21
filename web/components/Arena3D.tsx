@@ -10,6 +10,7 @@ import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
 import { applyCameraFrame } from "@/lib/cameraFrame";
 import { useCameraDebug } from "@/lib/useCameraDebug";
 import { CameraDebugPanel } from "@/components/CameraDebugPanel";
+import { addArenaBackground } from "@/lib/arenaEnvironment";
 
 type PlayerSide = "left" | "right";
 
@@ -337,7 +338,7 @@ export function Arena3D() {
     if (!hostRef.current) return;
     const host = hostRef.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#07070d");
+    addArenaBackground(scene);
 
     const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
 
@@ -366,14 +367,6 @@ export function Arena3D() {
     const green = new THREE.DirectionalLight("#3dd68c", 1.8);
     green.position.set(3, 2, 1);
     scene.add(green);
-
-    const floor = new THREE.Mesh(
-      new THREE.CylinderGeometry(2.4, 2.4, 0.08, 72),
-      createMaterial("#12131d"),
-    );
-    floor.position.y = -0.04;
-    scene.add(floor);
-    scene.add(new THREE.GridHelper(5, 18, "#343055", "#171729"));
 
     const leftBot = makeRobot("#3dd68c");
     const rightBot = makeRobot("#ff5c5c");
