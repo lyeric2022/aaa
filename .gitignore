@@ -11,3 +11,7 @@ web/.next/
 web/data/
 web/public/uploads/
 assets/demo/*.mp4
+
+# python venvs
+.venv/
+agents/.venv/

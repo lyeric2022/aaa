@@ -25,16 +25,31 @@ export async function saveMove(record: MoveRecord): Promise<void> {
 }
 
 export async function getMove(id: string): Promise<MoveRecord | null> {
+  await seedDemoMove();
+  const candidateIds = id.endsWith("_sonic")
+    ? [id, id.replace(/_sonic$/, "")]
+    : [id];
+
   try {
-    const raw = await fs.readFile(path.join(MOVES_DIR, `${id}.json`), "utf8");
-    return JSON.parse(raw) as MoveRecord;
+    for (const candidateId of candidateIds) {
+      try {
+        const raw = await fs.readFile(
+          path.join(MOVES_DIR, `${candidateId}.json`),
+          "utf8",
+        );
+        return JSON.parse(raw) as MoveRecord;
+      } catch {
+        /* try next candidate */
+      }
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
 export async function listMoves(): Promise<MoveRecord[]> {
-  await ensureDirs();
+  await seedDemoMove();
   const files = await fs.readdir(MOVES_DIR);
   const moves: MoveRecord[] = [];
   for (const file of files.filter((f) => f.endsWith(".json"))) {

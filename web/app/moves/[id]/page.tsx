@@ -4,6 +4,7 @@ import { MoveCardView } from "@/components/MoveCardView";
 import { RobotReplay3D } from "@/components/RobotReplay3D";
 import { VerificationPanel } from "@/components/VerificationPanel";
 import { MoveAnnouncerButton } from "@/components/MoveAnnouncerButton";
+import { LiveJudgePanel } from "@/components/LiveJudgePanel";
 
 export default async function MovePage({
   params,
@@ -36,6 +37,7 @@ export default async function MovePage({
       </div>
       <div className="grid gap-6">
         <MoveCardView card={record.move_card} motionStats={record.stats} />
+        <LiveJudgePanel moveId={id} />
         <RobotReplay3D moveId={id} />
         <VerificationPanel card={record.move_card} />
       </div>
