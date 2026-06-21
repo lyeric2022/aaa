@@ -24,6 +24,40 @@ Open:
 - **Move card / Skill Lab:** http://localhost:3000/moves/ghost_jab_combo_sonic
 - **3D Arena:** http://localhost:3000/arena
 
+### Run Fetch.ai Judge/Coach agents
+
+The live Judge panel calls a local bridge, which sends move stats to the Judge
+uAgent and asks the Coach uAgent for fixes when needed. Before using the live
+Judge panel, run these in separate terminals:
+
+```bash
+cd agents
+conda activate ghost-fighter-agents
+python coach_agent.py
+```
+
+```bash
+cd agents
+conda activate ghost-fighter-agents
+python judge_agent.py
+```
+
+```bash
+cd agents
+conda activate ghost-fighter-agents
+uvicorn web_bridge:app --port 8010 --reload
+```
+
+Then start the web app with the bridge URL:
+
+```bash
+cd web
+JUDGE_BRIDGE_URL=http://localhost:8010 npm run dev
+```
+
+The agents read `agents/.env`. Make sure it includes `COACH_ADDRESS`,
+`JUDGE_ADDRESS`, `COACH_ENDPOINT`, `JUDGE_ENDPOINT`, and `BRIDGE_MODE=agent`.
+
 ### Optional: arena announcer voice
 
 The arena can call fights with Deepgram TTS. Copy the example env file and add your key:
