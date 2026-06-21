@@ -37,20 +37,22 @@ Without a key, the app builds and runs normally — you just see “Announcer of
 
 ### Optional: Redis move-memory layer
 
-Redis can serve as the move-memory layer: move cards, fighters, leaderboards,
+Redis serves as the move-memory layer: move cards, fighters, leaderboards,
 similarity search, and historical fight performance. When Redis is reachable it
 becomes the source of truth; otherwise the app falls back to JSON files under
 `web/data/` and everything still works.
 
-Start a local Redis (Docker):
+The app uses a hosted **Redis Cloud** instance. Point it at your database by
+setting `REDIS_URL` in `web/.env.local` (see `web/.env.local.example`):
 
 ```bash
-docker run -p 6379:6379 redis:7
+REDIS_URL=redis://default:<password>@<host>:<port>
 ```
 
-It's used automatically at `redis://127.0.0.1:6379`. To point elsewhere or to
-disable it, set `REDIS_URL` / `REDIS_DISABLED=1` in `web/.env.local` (see
-`web/.env.local.example`).
+Grab the host, port, and default-user password from the Redis Cloud console
+(Databases → your DB → Security). To run against a local Redis instead, set
+`REDIS_URL=redis://127.0.0.1:6379` (e.g. `docker run -p 6379:6379 redis:7`), or
+set `REDIS_DISABLED=1` to force the JSON-file fallback.
 
 What lives in Redis (`web/lib/moveMemory.ts`):
 
@@ -178,8 +180,8 @@ move_cards/ghost_jab_combo.json
 - Next.js 15 + React 19
 - Three.js + URDFLoader for 3D replay and arena
 - TypeScript scoring engine ported from `scripts/analyze_motion.py`
-- Redis move-memory layer (move cards, leaderboards, similarity search, fight
-  history) with a JSON file store in `web/data/` as the automatic fallback
+- Redis Cloud move-memory layer (move cards, leaderboards, similarity search,
+  fight history) with a JSON file store in `web/data/` as the automatic fallback
 - Optional Deepgram TTS for arena announcer (`/api/tts`)
 - SONIC / G1 motion assets from [UFB Studio](https://studio.ultimatebots.com/editor)
 
