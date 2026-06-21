@@ -35,6 +35,36 @@ cp .env.local.example .env.local
 
 Without a key, the app builds and runs normally — you just see “Announcer off” in the arena.
 
+### Optional: Redis move-memory layer
+
+Redis can serve as the move-memory layer: move cards, fighters, leaderboards,
+similarity search, and historical fight performance. When Redis is reachable it
+becomes the source of truth; otherwise the app falls back to JSON files under
+`web/data/` and everything still works.
+
+Start a local Redis (Docker):
+
+```bash
+docker run -p 6379:6379 redis:7
+```
+
+It's used automatically at `redis://127.0.0.1:6379`. To point elsewhere or to
+disable it, set `REDIS_URL` / `REDIS_DISABLED=1` in `web/.env.local` (see
+`web/.env.local.example`).
+
+What lives in Redis (`web/lib/moveMemory.ts`):
+
+- **Move cards / fighters** — `move:{id}` / `fighter:{id}` JSON, indexed by
+  creation time in sorted sets for ordered listing.
+- **Leaderboards** — `lb:moves` / `lb:fighters` sorted sets keyed by
+  deployability (`/leaderboard`, `GET /api/leaderboard`).
+- **Similarity search** — each move's stats become a normalized feature vector
+  (`moves:vectors`); `GET /api/moves/[id]/similar?k=5` ranks by cosine
+  similarity, also surfaced as "Similar moves" on the move page.
+- **Historical performance** — finished fights are folded into per-move and
+  per-fighter counters plus a recent-fights log (`GET /api/arena/history`;
+  written by `POST /api/arena/fight` and the live arena on KO).
+
 ### Production build
 
 ```bash
@@ -63,7 +93,9 @@ If you see `Can't resolve '@deepgram/sdk'`, run `npm install` in `web/` first. T
 - `/moves/[id]` — skill card, 3D replay, verification ladder
 - `/fighters/build` — create a fighter loadout from move cards
 - `/arena` — 3D robot-sports duel with health bars and move playback
-- `/leaderboard` — top moves and fighters by deployability
+- `/leaderboard` — top moves and fighters by deployability (Redis sorted sets)
+- `GET /api/moves/[id]/similar` — feature-vector similarity search
+- `GET /api/arena/history` — recent fights from the move-memory log
 
 ## AI opponent ("the enemy")
 
@@ -146,7 +178,8 @@ move_cards/ghost_jab_combo.json
 - Next.js 15 + React 19
 - Three.js + URDFLoader for 3D replay and arena
 - TypeScript scoring engine ported from `scripts/analyze_motion.py`
-- JSON file store in `web/data/` during local dev
+- Redis move-memory layer (move cards, leaderboards, similarity search, fight
+  history) with a JSON file store in `web/data/` as the automatic fallback
 - Optional Deepgram TTS for arena announcer (`/api/tts`)
 - SONIC / G1 motion assets from [UFB Studio](https://studio.ultimatebots.com/editor)
 

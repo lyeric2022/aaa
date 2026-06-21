@@ -1,6 +1,18 @@
 import fs from "fs/promises";
 import path from "path";
 import type { Fighter, MoveRecord } from "./types";
+import {
+  getFighterMemory,
+  getMoveMemory,
+  listFightersMemory,
+  listMovesMemory,
+  saveFighterMemory,
+  saveMoveMemory,
+} from "./moveMemory";
+
+// Storage delegates to the Redis move-memory layer when it is reachable, and
+// transparently falls back to JSON files on disk otherwise. The Redis helpers
+// return null / false when Redis is unavailable, which is the fallback signal.
 
 const DATA = path.join(process.cwd(), "data");
 const MOVES_DIR = path.join(DATA, "moves");
@@ -17,6 +29,7 @@ async function ensureDirs() {
 }
 
 export async function saveMove(record: MoveRecord): Promise<void> {
+  if (await saveMoveMemory(record)) return;
   await ensureDirs();
   await fs.writeFile(
     path.join(MOVES_DIR, `${record.move_card.id}.json`),
@@ -25,6 +38,8 @@ export async function saveMove(record: MoveRecord): Promise<void> {
 }
 
 export async function getMove(id: string): Promise<MoveRecord | null> {
+  const fromMemory = await getMoveMemory(id);
+  if (fromMemory) return fromMemory;
   try {
     const raw = await fs.readFile(path.join(MOVES_DIR, `${id}.json`), "utf8");
     return JSON.parse(raw) as MoveRecord;
@@ -34,6 +49,8 @@ export async function getMove(id: string): Promise<MoveRecord | null> {
 }
 
 export async function listMoves(): Promise<MoveRecord[]> {
+  const fromMemory = await listMovesMemory();
+  if (fromMemory) return fromMemory;
   await ensureDirs();
   const files = await fs.readdir(MOVES_DIR);
   const moves: MoveRecord[] = [];
@@ -49,6 +66,7 @@ export async function listMoves(): Promise<MoveRecord[]> {
 }
 
 export async function saveFighter(fighter: Fighter): Promise<void> {
+  if (await saveFighterMemory(fighter)) return;
   await ensureDirs();
   await fs.writeFile(
     path.join(FIGHTERS_DIR, `${fighter.id}.json`),
@@ -57,6 +75,8 @@ export async function saveFighter(fighter: Fighter): Promise<void> {
 }
 
 export async function getFighter(id: string): Promise<Fighter | null> {
+  const fromMemory = await getFighterMemory(id);
+  if (fromMemory) return fromMemory;
   try {
     const raw = await fs.readFile(
       path.join(FIGHTERS_DIR, `${id}.json`),
@@ -69,6 +89,8 @@ export async function getFighter(id: string): Promise<Fighter | null> {
 }
 
 export async function listFighters(): Promise<Fighter[]> {
+  const fromMemory = await listFightersMemory();
+  if (fromMemory) return fromMemory;
   await ensureDirs();
   const files = await fs.readdir(FIGHTERS_DIR);
   const fighters: Fighter[] = [];

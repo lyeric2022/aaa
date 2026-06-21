@@ -1,29 +1,8 @@
-import { listMoves, listFighters } from "@/lib/storage";
-import type { LeaderboardEntry } from "@/lib/types";
+import { getLeaderboards } from "@/lib/leaderboard";
 import { VerdictBadge } from "@/components/StatBar";
 
 export default async function LeaderboardPage() {
-  const [moves, fighters] = await Promise.all([listMoves(), listFighters()]);
-
-  const moveEntries: LeaderboardEntry[] = moves
-    .filter((m) => m.move_card.verdict !== "pending")
-    .map((m) => ({
-      id: m.move_card.id,
-      name: m.move_card.name,
-      score: m.move_card.stats.deployability,
-      type: "move" as const,
-      verdict: m.move_card.verdict,
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  const fighterEntries: LeaderboardEntry[] = fighters
-    .map((f) => ({
-      id: f.id,
-      name: f.name,
-      score: f.stats.deployability,
-      type: "fighter" as const,
-    }))
-    .sort((a, b) => b.score - a.score);
+  const { moves: moveEntries, fighters: fighterEntries } = await getLeaderboards();
 
   return (
     <div>

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getFighter } from "@/lib/storage";
+import { recordFight } from "@/lib/moveMemory";
 import { loadMovesForFighters, simulateFight } from "@/lib/arena";
 import { getPersona, makePersonaController } from "@/lib/enemy/personas";
 
@@ -34,5 +35,43 @@ export async function POST(req: Request) {
     seed: body.seed,
     controllers: controllerB ? { b: controllerB } : undefined,
   });
+
+  // Fold the result into the Redis historical-performance tables. Move events
+  // come straight from the simulated rounds so per-move hit/damage tallies
+  // reflect real fights. No-op when Redis is unavailable.
+  const moveEvents = result.rounds
+    .filter((r) => r.event_type === "hit" || r.event_type === "miss" || r.event_type === "knockdown")
+    .map((r) => {
+      const card = [...moveMap.values()].find((m) => m.name === r.move_used);
+      return card
+        ? {
+            move_id: card.id,
+            hit: r.event_type !== "miss",
+            knockdown: r.event_type === "knockdown",
+            damage: r.damage,
+          }
+        : null;
+    })
+    .filter((e): e is NonNullable<typeof e> => e !== null);
+
+  const winnerId =
+    result.winner === fighterA.name
+      ? fighterA.id
+      : result.winner === fighterB.name
+        ? fighterB.id
+        : null;
+
+  await recordFight({
+    participants: [
+      { id: fighterA.id, name: fighterA.name },
+      { id: fighterB.id, name: fighterB.name },
+    ],
+    winner_id: winnerId,
+    final_hp: result.final_hp,
+    rounds: result.rounds.length,
+    source: "headless_sim",
+    move_events: moveEvents,
+  });
+
   return NextResponse.json(result);
 }

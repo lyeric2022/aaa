@@ -1,5 +1,7 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getMove } from "@/lib/storage";
+import { similarMoves } from "@/lib/moveMemory";
 import { MoveCardView } from "@/components/MoveCardView";
 import { RobotReplay3D } from "@/components/RobotReplay3D";
 import { VerificationPanel } from "@/components/VerificationPanel";
@@ -13,6 +15,9 @@ export default async function MovePage({
   const { id } = await params;
   const record = await getMove(id);
   if (!record) notFound();
+
+  // Redis-backed feature-vector similarity; empty when Redis isn't configured.
+  const similar = await similarMoves(id, 4);
 
   return (
     <div>
@@ -38,6 +43,29 @@ export default async function MovePage({
         <MoveCardView card={record.move_card} motionStats={record.stats} />
         <RobotReplay3D moveId={id} />
         <VerificationPanel card={record.move_card} />
+        {similar.length > 0 && (
+          <section className="rounded-2xl border border-[#2a2a3d] bg-[#14141f] p-5">
+            <p className="mb-1 text-xs uppercase tracking-wider text-[#7c5cff]">
+              Move memory · similarity search
+            </p>
+            <h2 className="mb-4 text-lg font-semibold">Similar moves</h2>
+            <div className="grid gap-2">
+              {similar.map((m) => (
+                <Link
+                  key={m.id}
+                  href={`/moves/${m.id}`}
+                  className="flex items-center gap-4 rounded-lg border border-[#2a2a3d] bg-black/25 p-3 hover:border-[#7c5cff]/40"
+                >
+                  <span className="flex-1 font-medium">{m.name}</span>
+                  <span className="text-xs text-[#8888a0]">{m.attack_type}</span>
+                  <span className="font-mono text-sm text-[#3dd68c]">
+                    {Math.round(m.similarity * 100)}% match
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

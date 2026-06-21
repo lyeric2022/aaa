@@ -116,3 +116,62 @@ export interface LeaderboardEntry {
   type: "move" | "fighter";
   verdict?: Verdict;
 }
+
+/** A move ranked by feature-vector similarity to another move. */
+export interface SimilarMove {
+  id: string;
+  name: string;
+  /** Cosine similarity in [0, 1]. */
+  similarity: number;
+  attack_type: string;
+  verdict: Verdict;
+  deployability: number;
+}
+
+/** Per-move historical performance, accumulated across recorded fights. */
+export interface MovePerformance {
+  uses: number;
+  hits: number;
+  misses: number;
+  knockdowns: number;
+  damage: number;
+}
+
+/** Per-fighter historical performance, accumulated across recorded fights. */
+export interface FighterPerformance {
+  matches: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  damage_dealt: number;
+}
+
+/** A compact record of a finished fight, kept in a recent-fights log. */
+export interface FightHistoryEntry {
+  id: string;
+  fighter_a: string;
+  fighter_b: string;
+  winner: string;
+  final_hp: { a: number; b: number };
+  rounds: number;
+  source: "headless_sim" | "live_arena";
+  created_at: string;
+}
+
+/** What `recordFight` ingests to update the historical-performance tables. */
+export interface FightRecordInput {
+  /** The two fighters, in order; `id` keys the perf tables, `name` is display. */
+  participants: [{ id: string; name: string }, { id: string; name: string }];
+  /** Winning participant id, or null for a draw. */
+  winner_id: string | null;
+  final_hp?: { a: number; b: number };
+  rounds?: number;
+  source: "headless_sim" | "live_arena";
+  /** Optional per-move tallies to fold into move performance. */
+  move_events?: {
+    move_id: string;
+    hit?: boolean;
+    knockdown?: boolean;
+    damage?: number;
+  }[];
+}

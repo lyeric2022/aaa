@@ -1185,7 +1185,25 @@ export function Arena3D() {
     const line = koCall(winner, loser);
     setLog((prev) => [line, ...prev.slice(0, 4)]);
     void announcer.speak(line);
-  }, [winner, left.name, right.name]);
+
+    // Log the bout into the Redis historical-performance layer. Player 2's id is
+    // the persona when an AI is piloting, otherwise a generic manual id. Fire and
+    // forget: a missing Redis just means no history is recorded.
+    const rightId = personaId || "player_2";
+    void fetch("/api/arena/history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        participants: [
+          { id: "player_1", name: left.name },
+          { id: rightId, name: right.name },
+        ],
+        winner_id: winner === left.name ? "player_1" : rightId,
+        final_hp: { a: Math.round(left.hp), b: Math.round(right.hp) },
+        source: "live_arena",
+      }),
+    }).catch(() => {});
+  }, [winner, left.name, right.name, left.hp, right.hp, personaId]);
 
   return (
     <div className="space-y-5">
