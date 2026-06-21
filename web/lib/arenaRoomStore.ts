@@ -50,6 +50,15 @@ const globalForArena = globalThis as typeof globalThis & {
 const rooms = globalForArena.__arenaRooms ?? new Map<string, RoomRecord>();
 globalForArena.__arenaRooms = rooms;
 
+// Dev HMR safety: a timer stored on globalThis survives module reloads, so an
+// old interval would keep running the previous version's tick logic. Clear any
+// stale timer on (re)load and reinstall the current one so live rooms keep
+// ticking without needing a fresh request.
+if (globalForArena.__arenaDecayTimer) {
+  clearInterval(globalForArena.__arenaDecayTimer);
+  globalForArena.__arenaDecayTimer = undefined;
+}
+
 function makeRoomId() {
   return randomBytes(3).toString("hex");
 }
@@ -106,6 +115,10 @@ function ensureDecayLoop() {
     }
   }, 40);
 }
+
+// Install the simulation loop now (and after every HMR reload, since the stale
+// timer was cleared above) so already-connected rooms keep advancing.
+ensureDecayLoop();
 
 export function setRoomInput(
   roomId: string,
