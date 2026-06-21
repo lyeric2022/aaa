@@ -431,6 +431,21 @@ function recoveryMsFor(move: ArenaMove) {
 // Below this you're too winded to act and must rest (visible breather windows).
 const MIN_STAMINA_TO_ACT = 30;
 
+// Footwork tuning. Movement is the neutral game: walk in to land, walk out to
+// make the opponent whiff. Units are arena metres.
+const MOVE_SPEED = 2.3; // walking speed in metres/sec
+const ARENA_BOUND = 2.15; // farthest each fighter can stand from centre
+const MIN_GAP = 0.92; // closest the two bodies can get (no overlap)
+// A committed strike lunges forward, so its effective reach is a bit longer
+// than the standing pose. This keeps the pocket generous enough to fight in.
+const LUNGE_REACH = 0.5;
+
+// How far a move can connect, mirroring the enemy brain's movePhysics().range
+// so the AI and the player share one notion of "in range".
+function reachFor(move: ArenaMove) {
+  return 0.6 + move.speed * 0.012 + move.power * 0.004 + LUNGE_REACH;
+}
+
 export function Arena3D() {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
@@ -441,6 +456,10 @@ export function Arena3D() {
   const rightStateRef = useRef<FighterState | null>(null);
   const deckCardsRef = useRef<MoveCard[]>([]);
   const playMoveRef = useRef<((side: PlayerSide, move: ArenaMove) => void) | null>(null);
+  // Currently-held movement keys (lowercased). Read by the movement tick.
+  const keysRef = useRef<Set<string>>(new Set());
+  // The AI's current walk intent for Player 2: -1 left, +1 right, 0 hold.
+  const aiIntentRef = useRef<number>(0);
   const [moves, setMoves] = useState<ArenaMove[]>([]);
   const [deckCards, setDeckCards] = useState<MoveCard[]>([]);
   const [personaId, setPersonaId] = useState<string>("");
@@ -489,6 +508,29 @@ export function Arena3D() {
   useEffect(() => {
     announcer.setEnabled(announcerOn);
   }, [announcerOn]);
+
+  // Footwork input: A/D walk Player 1, Left/Right arrows walk Player 2. We only
+  // track which keys are held here; the movement tick turns that into motion.
+  useEffect(() => {
+    const tracked = new Set(["a", "d", "arrowleft", "arrowright"]);
+    const onDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (!tracked.has(key)) return;
+      // Stop the arrow keys from scrolling the page while fighting.
+      if (key === "arrowleft" || key === "arrowright") e.preventDefault();
+      keysRef.current.add(key);
+    };
+    const onUp = (e: KeyboardEvent) => keysRef.current.delete(e.key.toLowerCase());
+    const clear = () => keysRef.current.clear();
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
 
   useEffect(() => {
     fetch("/api/tts")
@@ -583,9 +625,12 @@ export function Arena3D() {
       const deck = deckCardsRef.current;
       if (!ls || !rs || !deck.length) return;
       if (ls.hp <= 0 || rs.hp <= 0) return; // match decided
-      // Recovering from its own move, or too winded — rest and regenerate. This
-      // paces the AI instead of letting it spam, and lets stamina drive variety.
-      if (now < rs.recoverUntil || rs.stamina < MIN_STAMINA_TO_ACT) return;
+      // Locked in recovery — can neither strike nor reposition. (Footwork is
+      // free of stamina, so being winded no longer blocks walking into range.)
+      if (now < rs.recoverUntil) {
+        aiIntentRef.current = 0;
+        return;
+      }
       tick += 1;
       // The opponent's stance/cooldown is real now, so the tactician sees a live
       // world: it whiff-punishes when the player is recovering and backs off when
@@ -613,24 +658,30 @@ export function Arena3D() {
             stance: ls.attacking ? "extended" : ls.stance,
           },
           deck,
-          // The arena UI has no footwork/spacing mechanic — move buttons always
-          // connect — so the enemy fights from a fixed in-pocket range. Using the
-          // raw x-gap (~2.3) would read as permanently out of reach, leaving the
-          // executor stuck choosing "advance" (a no-op here) and never throwing.
-          range: 0.6,
+          // Real spacing now: the gap between the fighters drives the brain, so
+          // the executor walks the enemy into reach ("advance") and only throws
+          // ("move") once a strike can actually land.
+          range: Math.abs(ls.x - rs.x),
         },
         rng,
       );
-      // "advance"/"wait" are footwork the UI can't express, so treat any
-      // committed move as the action and let other beats pass as spacing.
       if (action.kind === "move") {
         const am = usableMoves.find((m) => m.id === action.moveId) ?? usableMoves[0];
-        // Only throw if it can actually afford this move; otherwise rest this
-        // beat to regenerate (the breather is part of the rhythm).
+        // In range: stop walking and commit, if it can afford the move; else
+        // rest this beat to regenerate (the breather is part of the rhythm).
+        aiIntentRef.current = 0;
         if (am && rs.stamina >= staminaCostFor(am)) playMoveRef.current?.("right", am);
+      } else if (action.kind === "advance") {
+        // Out of range: step toward the player until a strike can connect.
+        aiIntentRef.current = ls.x < rs.x ? -1 : 1;
+      } else {
+        aiIntentRef.current = 0; // wait / space
       }
     }, 260);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      aiIntentRef.current = 0;
+    };
   }, [personaId, usableMoves]);
 
   useEffect(() => {
@@ -765,11 +816,56 @@ export function Arena3D() {
       };
     };
     const timer = setInterval(() => {
-      setLeft(decay);
-      setRight(decay);
+      const now = Date.now();
+      const ls = leftStateRef.current;
+      const rs = rightStateRef.current;
+      if (!ls || !rs) {
+        setLeft(decay);
+        setRight(decay);
+        return;
+      }
+
+      const step = MOVE_SPEED * 0.04; // metres per 40ms tick
+      const keys = keysRef.current;
+      const live = ls.hp > 0 && rs.hp > 0;
+
+      // Footwork is only allowed in neutral: not mid-commit/recovery, match live.
+      let leftDir = 0;
+      if (live && now >= ls.recoverUntil) {
+        if (keys.has("a")) leftDir -= 1;
+        if (keys.has("d")) leftDir += 1;
+      }
+      // Player 2 walks from the arrow keys, or from the AI's intent when a
+      // persona is piloting it.
+      let rightDir = 0;
+      if (live && now >= rs.recoverUntil) {
+        if (personaId) {
+          rightDir = aiIntentRef.current;
+        } else {
+          if (keys.has("arrowleft")) rightDir -= 1;
+          if (keys.has("arrowright")) rightDir += 1;
+        }
+      }
+
+      // Apply movement as a delta onto each fighter's authoritative state so we
+      // never clobber knockback the strike resolver just wrote. The opponent's
+      // current position (from its ref) caps how far we can step toward it, so
+      // bodies never overlap and the left fighter stays on the left.
+      setLeft((p) => {
+        let nx = clamp(p.x + leftDir * step, -ARENA_BOUND, ARENA_BOUND);
+        const otherX = rightStateRef.current?.x ?? rs.x;
+        nx = Math.min(nx, otherX - MIN_GAP);
+        return { ...decay(p), x: nx };
+      });
+      setRight((p) => {
+        let nx = clamp(p.x + rightDir * step, -ARENA_BOUND, ARENA_BOUND);
+        const otherX = leftStateRef.current?.x ?? ls.x;
+        nx = Math.max(nx, otherX + MIN_GAP);
+        return { ...decay(p), x: nx };
+      });
     }, 40);
     return () => clearInterval(timer);
-  }, []);
+  }, [personaId]);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
     const now = Date.now();
@@ -783,12 +879,6 @@ export function Arena3D() {
     // Can't act while recovering or too winded — this is what stops the spam.
     if (now < attacker.recoverUntil || attacker.stamina < cost) return;
 
-    // Counter hit: striking an opponent who is mid-move or recovering lands
-    // harder. This is what makes timing (and the enemy's whiff-punish) matter.
-    const defenderBusy = now < defenderState.recoverUntil || defenderState.attacking;
-    const dmg = Math.round(damageFor(move) * (defenderBusy ? 1.6 : 1));
-    const bal = Math.round(balanceDamageFor(move) * (defenderBusy ? 1.35 : 1));
-    const knock = 0.18 + move.speed / 500;
     const recoverMs = recoveryMsFor(move);
     const attackerName = side === "left" ? left.name : right.name;
     const defenderName = side === "left" ? right.name : left.name;
@@ -803,6 +893,27 @@ export function Arena3D() {
       recoverUntil: now + recoverMs,
       stance: "recovering",
     });
+
+    // Spacing check: the strike only lands if the opponent is within reach.
+    // Out of range it whiffs — the attacker still commits (stamina + recovery
+    // lockout), which is the price of throwing into open air and the window the
+    // opponent punishes. This is what makes footwork matter.
+    const gap = Math.abs(ls.x - rs.x);
+    if (gap > reachFor(move)) {
+      if (side === "left") setLeft(applyAttacker);
+      else setRight(applyAttacker);
+      const whiff = `${attackerName}'s ${move.name} whiffs — ${defenderName} stays out of range!`;
+      setLog((prev) => [whiff, ...prev.slice(0, 4)]);
+      return;
+    }
+
+    // Counter hit: striking an opponent who is mid-move or recovering lands
+    // harder. This is what makes timing (and the enemy's whiff-punish) matter.
+    const defenderBusy = now < defenderState.recoverUntil || defenderState.attacking;
+    const dmg = Math.round(damageFor(move) * (defenderBusy ? 1.6 : 1));
+    const bal = Math.round(balanceDamageFor(move) * (defenderBusy ? 1.35 : 1));
+    const knock = 0.18 + move.speed / 500;
+
     const applyDefender =
       (dir: 1 | -1) =>
       (p: FighterState): FighterState => {
@@ -840,6 +951,7 @@ export function Arena3D() {
 
   function reset() {
     koSpokenRef.current = false;
+    aiIntentRef.current = 0;
     setLeft((p) => ({
       ...p,
       hp: 100,
@@ -968,8 +1080,17 @@ export function Arena3D() {
             defaultFrame={cameraDefault}
             onReset={resetToDefault}
           />
-          <div className="absolute left-4 top-4 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
-            Drag to rotate · scroll/pinch to zoom · right-drag to pan
+          <div className="absolute left-4 top-4 space-y-1 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
+            <div>Drag to rotate · scroll/pinch to zoom · right-drag to pan</div>
+            <div className="text-[#8888a0]">
+              Move: <span className="text-[#3dd68c]">P1 A / D</span>
+              {rightIsAI ? (
+                <> · <span className="text-[#ff5c5c]">P2 auto</span></>
+              ) : (
+                <> · <span className="text-[#ff5c5c]">P2 ← / →</span></>
+              )}{" "}
+              · close the distance to land hits
+            </div>
           </div>
           <Image
             src="/models/unitree_g1/g1.png"
