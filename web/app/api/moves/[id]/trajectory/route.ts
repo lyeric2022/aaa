@@ -32,11 +32,36 @@ async function findJointCsv(dir: string): Promise<string | null> {
   return null;
 }
 
-async function candidateJointPaths(id: string, sonicZipPath?: string) {
+async function candidateJointPaths(
+  id: string,
+  sonicZipPath?: string,
+  motionDir?: string,
+) {
   const root = process.cwd();
   const repoRoot = path.join(root, "..");
-  const paths: string[] = [
+  const paths: string[] = [];
+
+  if (motionDir) {
+    paths.push(path.join(motionDir, "joint_pos.csv"));
+  }
+
+  paths.push(
     path.join(repoRoot, "assets", "motions", `${id}_extracted`, "joint_pos.csv"),
+  );
+
+  if (id === "ghost_counter_cross") {
+    paths.push(
+      path.join(
+        repoRoot,
+        "assets",
+        "motions",
+        "ghost_jab_combo_extracted",
+        "joint_pos.csv",
+      ),
+    );
+  }
+
+  paths.push(
     path.join(
       root,
       "data",
@@ -45,13 +70,19 @@ async function candidateJointPaths(id: string, sonicZipPath?: string) {
       "ghost_jab_combo_extracted",
       "joint_pos.csv",
     ),
-  ];
+  );
 
   if (sonicZipPath) {
     const zipDir = path.dirname(sonicZipPath);
     const zipBase = path.basename(sonicZipPath, path.extname(sonicZipPath));
-    const extractedBesideZip = path.join(zipDir, `${zipBase.replace(/_sonic$/, "")}_extracted`, "joint_pos.csv");
+    const extractedBesideZip = path.join(
+      zipDir,
+      `${zipBase.replace(/_sonic$/, "")}_extracted`,
+      "joint_pos.csv",
+    );
     const extractedById = path.join(zipDir, `${id}_extracted`, "joint_pos.csv");
+    const uploadExtracted = await findJointCsv(zipDir);
+    if (uploadExtracted) paths.unshift(uploadExtracted);
     for (const candidate of [extractedById, extractedBesideZip]) {
       try {
         await fs.access(candidate);
@@ -76,6 +107,7 @@ export async function GET(
   for (const jointPath of await candidateJointPaths(
     id,
     record.move_card.sonic_zip_path,
+    record.move_card.motion_dir,
   )) {
     try {
       const csv = await fs.readFile(jointPath, "utf8");

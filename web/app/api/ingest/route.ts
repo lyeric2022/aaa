@@ -9,6 +9,12 @@ import {
   parseFps,
   parseJointCsv,
 } from "@/lib/analyze";
+import {
+  applyJudgeToMoveCard,
+  judgeMove,
+  statsForJudge,
+  verdictFromJudge,
+} from "@/lib/judgeBridge";
 import type { MoveRecord } from "@/lib/types";
 import { saveMove, publicUploadUrl, uploadsPath } from "@/lib/storage";
 
@@ -167,7 +173,7 @@ export async function POST(req: Request) {
     }
 
     const motionStats = analyzeJointPositions(positions, fps);
-    const moveCard = buildMoveCard(id, name, motionStats, {
+    let moveCard = buildMoveCard(id, name, motionStats, {
       source: "sonic_zip",
       sonicValidated: true,
       sonicZipPath: zipPath,
@@ -176,6 +182,17 @@ export async function POST(req: Request) {
     if (moveCard.verification.status === "passed") {
       moveCard.pipeline.deploy =
         "studio sonic + gear-sonic physics export parsed, ready for G1 proof";
+    }
+
+    const judgeResult = await judgeMove(id, statsForJudge(moveCard.stats), {
+      moveId: id,
+    });
+    if (judgeResult) {
+      moveCard = applyJudgeToMoveCard(moveCard, judgeResult);
+      motionStats.verdict = verdictFromJudge(
+        judgeResult.deployable,
+        judgeResult.score,
+      );
     }
 
     const record: MoveRecord = { stats: motionStats, move_card: moveCard };

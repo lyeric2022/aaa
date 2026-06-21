@@ -1,26 +1,55 @@
 import { NextResponse } from "next/server";
-import { getMove } from "@/lib/storage";
-import { judgeMove } from "@/lib/judge";
+import {
+  applyJudgeToMoveCard,
+  judgeMove,
+  statsForJudge,
+  verdictFromJudge,
+} from "@/lib/judgeBridge";
+import { getMove, saveMove } from "@/lib/storage";
 
 export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const move = await getMove(id);
-  if (!move) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  const record = await getMove(id);
+  if (!record) {
+    return NextResponse.json({ error: "Move not found" }, { status: 404 });
+  }
 
-  try {
-    const result = await judgeMove(move.move_card.name, move.move_card.stats);
-    return NextResponse.json(result);
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Judge bridge unavailable";
+  const card = record.move_card;
+  if (card.verdict === "pending" || card.stats.deployability === 0) {
     return NextResponse.json(
-      {
-        error: `${message}. Start the agent bridge: cd agents && uvicorn web_bridge:app --port 8010`,
-      },
-      { status: 502 },
+      { error: "Move has no scored stats yet. Upload a SONIC zip first." },
+      { status: 400 },
     );
   }
+
+  const judgeResult = await judgeMove(card.name, statsForJudge(card.stats), {
+    moveId: id,
+  });
+  if (!judgeResult) {
+    return NextResponse.json(
+      {
+        error:
+          "Fetch.ai Judge bridge unavailable. Run: cd agents && .venv/bin/uvicorn web_bridge:app --port 8010",
+      },
+      { status: 503 },
+    );
+  }
+
+  const moveCard = applyJudgeToMoveCard(card, judgeResult);
+  const stats = record.stats
+    ? {
+        ...record.stats,
+        verdict: verdictFromJudge(judgeResult.deployable, judgeResult.score),
+      }
+    : null;
+
+  await saveMove({ stats, move_card: moveCard });
+
+  return NextResponse.json({
+    judge: moveCard.judge,
+    move_card: moveCard,
+  });
 }

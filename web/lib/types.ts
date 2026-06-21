@@ -1,5 +1,16 @@
 export type Verdict = "safe" | "needs_edits" | "unsafe" | "pending";
 
+/** Structured verdict from the Fetch.ai Judge + Coach bridge. */
+export interface JudgeVerdict {
+  deployable: boolean;
+  score: number;
+  failing_dims: string[];
+  reasoning: string;
+  coach_summary?: string;
+  fixes?: Record<string, string>;
+  judged_at: string;
+}
+
 export interface MoveStats {
   speed: number;
   power: number;
@@ -33,9 +44,13 @@ export interface MoveCard {
   stats: MoveStats;
   verdict: Verdict;
   coach_feedback: string;
+  /** Live Fetch.ai judge + coach payload (also mirrored into coach_feedback). */
+  judge?: JudgeVerdict;
   video_url?: string;
   plaza_video_url?: string;
   sonic_zip_path?: string;
+  /** Extracted SONIC CSV folder (joint_pos.csv) for 3D replay. */
+  motion_dir?: string;
   verification?: VerificationResult;
   created_at: string;
   pipeline: {
