@@ -17,6 +17,10 @@ import { addArenaBackground } from "@/lib/arenaEnvironment";
 
 type PlayerSide = "left" | "right";
 
+// Each move animates a distinct body action so the fight reads as a varied
+// kit instead of one repeated punch. The archetype is what drives the skeleton.
+type MoveAnim = "jab" | "cross" | "hook" | "sweep" | "guard" | "uppercut";
+
 type FighterState = {
   name: string;
   hp: number;
@@ -27,6 +31,8 @@ type FighterState = {
   attacking: boolean;
   attackSide: PlayerSide | null;
   attackStart: number;
+  /** Which animation archetype the current attack is playing. */
+  attackAnim: MoveAnim | null;
   hitFlash: number;
   /** Date.now() ms until which this fighter is recovering and cannot act. */
   recoverUntil: number;
@@ -40,6 +46,7 @@ type ArenaMove = {
   power: number;
   balanceRisk: number;
   recovery: number;
+  anim: MoveAnim;
 };
 
 function clamp(value: number, lo = 0, hi = 100) {
@@ -57,14 +64,28 @@ function prettifyName(raw: string): string {
   return base.replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Pick a distinct animation archetype from a scored move's profile so two
+// different cards rarely look the same: fast+light reads as a jab, heavy as a
+// cross, high-risk low moves as a sweep, and so on.
+function animForStats(speed: number, power: number, balanceRisk: number): MoveAnim {
+  if (balanceRisk >= 60 && power >= 18) return "sweep";
+  if (power >= 24) return "guard";
+  if (power >= 18 && balanceRisk >= 40) return "uppercut";
+  if (power >= 14) return "cross";
+  if (speed >= 60) return "jab";
+  return "hook";
+}
+
 function toArenaMove(record: MoveRecord): ArenaMove {
+  const { speed, power, balance_risk: balanceRisk, recovery } = record.move_card.stats;
   return {
     id: record.move_card.id,
     name: prettifyName(record.move_card.name || record.move_card.id),
-    speed: record.move_card.stats.speed,
-    power: record.move_card.stats.power,
-    balanceRisk: record.move_card.stats.balance_risk,
-    recovery: record.move_card.stats.recovery,
+    speed,
+    power,
+    balanceRisk,
+    recovery,
+    anim: animForStats(speed, power, balanceRisk),
   };
 }
 
@@ -201,34 +222,172 @@ function makeRobot(accent: string) {
   return robot;
 }
 
+// Joints the pose system writes. Every frame resets these to a neutral guard
+// first, so switching between archetypes never leaves a limb stuck mid-swing.
+const POSE_JOINTS = [
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "waist_yaw_joint",
+  "waist_pitch_joint",
+  "waist_roll_joint",
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_knee_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_knee_joint",
+] as const;
+
+type JointMap = Partial<Record<(typeof POSE_JOINTS)[number], number>>;
+
+// A relaxed fighting guard: hands up, slight knee bend. Idle robots and the
+// start/end of every attack settle here.
+const NEUTRAL_GUARD: JointMap = {
+  left_shoulder_pitch_joint: -0.22,
+  left_shoulder_roll_joint: 0.18,
+  left_elbow_joint: 1.05,
+  right_shoulder_pitch_joint: -0.22,
+  right_shoulder_roll_joint: -0.18,
+  right_elbow_joint: 1.05,
+  waist_pitch_joint: 0.06,
+  left_knee_joint: 0.08,
+  right_knee_joint: 0.08,
+};
+
+// Per-archetype joint targets at the peak of the swing (envelope = 1). Each
+// touches a different mix of joints so the moves read as visually distinct.
+// `dir` is +1 for the left-side fighter and -1 for the right so rotations
+// mirror correctly.
+function poseTargets(anim: MoveAnim, dir: number): JointMap {
+  switch (anim) {
+    // Snappy lead-hand straight: left arm fires forward, body stays square.
+    case "jab":
+      return {
+        left_shoulder_pitch_joint: -1.55,
+        left_shoulder_roll_joint: 0.05,
+        left_elbow_joint: 0.12,
+        right_shoulder_pitch_joint: -0.25,
+        right_elbow_joint: 1.2,
+        waist_yaw_joint: 0.14 * dir,
+      };
+    // Heavy rear-hand cross: huge torso rotation drives the right arm through.
+    case "cross":
+      return {
+        right_shoulder_pitch_joint: -1.5,
+        right_shoulder_roll_joint: -0.3 * dir,
+        right_elbow_joint: 0.15,
+        left_shoulder_pitch_joint: 0.15,
+        left_elbow_joint: 1.3,
+        waist_yaw_joint: 0.55 * dir,
+        waist_pitch_joint: 0.18,
+      };
+    // Wide horizontal hook: arm swings across with a roll-out and waist turn.
+    case "hook":
+      return {
+        right_shoulder_pitch_joint: -0.9,
+        right_shoulder_roll_joint: -1.15 * dir,
+        right_shoulder_yaw_joint: 0.6 * dir,
+        right_elbow_joint: 1.45,
+        left_shoulder_pitch_joint: -0.1,
+        left_elbow_joint: 1.1,
+        waist_yaw_joint: 0.42 * dir,
+        waist_roll_joint: 0.12 * dir,
+      };
+    // Rising uppercut: dip then drive up from the legs, right fist comes up.
+    case "uppercut":
+      return {
+        right_shoulder_pitch_joint: 0.55,
+        right_shoulder_roll_joint: -0.15 * dir,
+        right_elbow_joint: 1.95,
+        left_shoulder_pitch_joint: -0.3,
+        left_elbow_joint: 1.2,
+        waist_yaw_joint: 0.3 * dir,
+        waist_pitch_joint: -0.28,
+        left_knee_joint: 0.55,
+        right_knee_joint: 0.55,
+      };
+    // Low spinning sweep: deep crouch, lead leg sweeps out, arms counterbalance.
+    case "sweep":
+      return {
+        waist_pitch_joint: 0.5,
+        waist_yaw_joint: 0.45 * dir,
+        left_hip_pitch_joint: -0.2,
+        left_knee_joint: 1.35,
+        right_hip_pitch_joint: -0.5,
+        right_hip_roll_joint: -0.7 * dir,
+        right_knee_joint: 0.25,
+        left_shoulder_pitch_joint: -0.6,
+        left_shoulder_roll_joint: 0.9,
+        right_shoulder_pitch_joint: -0.6,
+        right_shoulder_roll_joint: -0.9,
+      };
+    // Two-handed overhead guard break: both arms rise high then smash down.
+    case "guard":
+      return {
+        left_shoulder_pitch_joint: -2.6,
+        left_shoulder_roll_joint: 0.25,
+        left_elbow_joint: 0.45,
+        right_shoulder_pitch_joint: -2.6,
+        right_shoulder_roll_joint: -0.25,
+        right_elbow_joint: 0.45,
+        waist_pitch_joint: 0.22,
+        left_knee_joint: 0.4,
+        right_knee_joint: 0.4,
+      };
+  }
+}
+
+// Vertical crouch offset (metres) applied to the whole robot at peak swing, so
+// low moves visibly drop the body rather than only bending joints.
+function crouchDepth(anim: MoveAnim): number {
+  if (anim === "sweep") return 0.32;
+  if (anim === "uppercut") return 0.14;
+  if (anim === "guard") return 0.1;
+  return 0;
+}
+
 function setRobotPose(
   robot: THREE.Group,
   side: PlayerSide,
   attackProgress: number,
   hitFlash: number,
+  anim: MoveAnim | null,
 ) {
   const direction = side === "left" ? 1 : -1;
   robot.rotation.y = side === "left" ? 0 : Math.PI;
-  robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
 
+  const punch = anim ? Math.sin(Math.min(1, attackProgress) * Math.PI) : 0;
+  const flashBob = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
+  const crouch = anim ? crouchDepth(anim) * punch : 0;
+  robot.position.y = flashBob - crouch;
+  robot.scale.setScalar(1 + punch * 0.04);
+
+  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
+  if (urdf?.setJointValue) {
+    const targets = anim ? poseTargets(anim, direction) : null;
+    // Blend neutral guard -> archetype peak by the swing envelope. Joints not
+    // named by an archetype fall back to the neutral value, which keeps the
+    // rest of the body stable instead of snapping to zero.
+    for (const joint of POSE_JOINTS) {
+      const base = NEUTRAL_GUARD[joint] ?? 0;
+      const peak = targets?.[joint] ?? base;
+      urdf.setJointValue(joint, base + (peak - base) * punch);
+    }
+  }
+
+  // Placeholder primitive limbs (only visible if the URDF fails to load) keep a
+  // generic punch so the fallback robot still reacts.
   const rightUpper = robot.getObjectByName("rightUpperArm");
   const rightFore = robot.getObjectByName("rightForearm");
   const leftUpper = robot.getObjectByName("leftUpperArm");
   const leftFore = robot.getObjectByName("leftForearm");
   const torso = robot.getObjectByName("torso");
-
-  const punch = Math.sin(Math.min(1, attackProgress) * Math.PI);
-  robot.scale.setScalar(1 + punch * 0.04);
-  const urdf = robot.userData.urdf as URDFRobotLike | undefined;
-  if (urdf?.setJointValue) {
-    const reach = punch * (side === "left" ? -1 : 1);
-    urdf.setJointValue("right_shoulder_pitch_joint", -0.45 - punch * 1.15);
-    urdf.setJointValue("right_shoulder_roll_joint", reach * 0.35);
-    urdf.setJointValue("right_elbow_joint", 0.35 + punch * 1.2);
-    urdf.setJointValue("left_shoulder_pitch_joint", -0.2 + punch * 0.35);
-    urdf.setJointValue("left_elbow_joint", 0.7 - punch * 0.25);
-    urdf.setJointValue("waist_yaw_joint", reach * 0.22);
-  }
   if (rightUpper) {
     rightUpper.position.z = punch * 0.52 * direction;
     rightUpper.position.x = 0.36 + punch * 0.16;
@@ -294,6 +453,7 @@ export function Arena3D() {
     attacking: false,
     attackSide: null,
     attackStart: 0,
+    attackAnim: null,
     hitFlash: 0,
     recoverUntil: 0,
     stance: "stable",
@@ -307,6 +467,7 @@ export function Arena3D() {
     attacking: false,
     attackSide: null,
     attackStart: 0,
+    attackAnim: null,
     hitFlash: 0,
     recoverUntil: 0,
     stance: "stable",
@@ -348,10 +509,10 @@ export function Arena3D() {
 
   const arenaBasics = useMemo<ArenaMove[]>(
     () => [
-      { id: "basic_jab", name: "Quick Jab", speed: 72, power: 11, balanceRisk: 28, recovery: 64 },
-      { id: "basic_cross", name: "Counter Cross", speed: 54, power: 22, balanceRisk: 48, recovery: 50 },
-      { id: "basic_sweep", name: "Low Sweep", speed: 46, power: 17, balanceRisk: 62, recovery: 44 },
-      { id: "basic_guard", name: "Guard Break", speed: 38, power: 26, balanceRisk: 70, recovery: 36 },
+      { id: "basic_jab", name: "Quick Jab", speed: 72, power: 11, balanceRisk: 28, recovery: 64, anim: "jab" },
+      { id: "basic_cross", name: "Counter Cross", speed: 54, power: 22, balanceRisk: 48, recovery: 50, anim: "cross" },
+      { id: "basic_sweep", name: "Low Sweep", speed: 46, power: 17, balanceRisk: 62, recovery: 44, anim: "sweep" },
+      { id: "basic_guard", name: "Guard Break", speed: 38, power: 26, balanceRisk: 70, recovery: 36, anim: "guard" },
     ],
     [],
   );
@@ -549,8 +710,8 @@ export function Arena3D() {
       rightBot.position.x = THREE.MathUtils.lerp(rightBot.position.x, rightState.x - rightLunge, 0.28);
       leftBot.position.z = Math.sin(t * 2.2) * 0.015;
       rightBot.position.z = -Math.sin(t * 2.1) * 0.015;
-      setRobotPose(leftBot, "left", leftProgress, leftState.hitFlash);
-      setRobotPose(rightBot, "right", rightProgress, rightState.hitFlash);
+      setRobotPose(leftBot, "left", leftProgress, leftState.hitFlash, leftState.attackAnim);
+      setRobotPose(rightBot, "right", rightProgress, rightState.hitFlash, rightState.attackAnim);
 
       if (leftImpact) {
         leftImpact.visible = leftProgress > 0.2 && leftProgress < 0.82;
@@ -595,6 +756,7 @@ export function Arena3D() {
         hitFlash: Math.max(0, p.hitFlash - 0.08),
         attacking: p.attacking && now - p.attackStart < 520,
         attackSide: now - p.attackStart < 520 ? p.attackSide : null,
+        attackAnim: now - p.attackStart < 520 ? p.attackAnim : null,
         // Slow stamina regen so the ~3-move budget actually bites and forces
         // rest windows; balance returns faster once out of stagger.
         stamina: clamp(p.stamina + (recovering ? 0.4 : 1.0)),
@@ -636,6 +798,7 @@ export function Arena3D() {
       attacking: true,
       attackSide: side,
       attackStart: now,
+      attackAnim: move.anim,
       stamina: clamp(p.stamina - cost),
       recoverUntil: now + recoverMs,
       stance: "recovering",
