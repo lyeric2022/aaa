@@ -442,8 +442,13 @@ export function Arena3D() {
   const playerSide = parsePlayerSide(searchParams.get("player"));
   const playerNumber = playerSide === "left" ? 1 : 2;
   const [personaId, setPersonaId] = useState<string>("");
-  const vsHuman = personaId === "";
-  const multiplayer = useArenaMultiplayer({ enabled: vsHuman, roomId, playerSide });
+  // Online 1v1 is opt-in: pick "online" from the dropdown, or arrive on a shared
+  // room link. Everything else (default + AI personas) is local play with live
+  // keyboard footwork, so WASD/arrow movement keeps working.
+  const onlineMode = personaId === "online" || !!roomId;
+  // A real AI persona is selected (not local human, not online).
+  const aiPersonaId = onlineMode ? "" : personaId;
+  const multiplayer = useArenaMultiplayer({ enabled: onlineMode, roomId, playerSide });
 
   const hostRef = useRef<HTMLDivElement | null>(null);
   const leftRobot = useRef<THREE.Group | null>(null);
@@ -616,12 +621,12 @@ export function Arena3D() {
   // controller contract as the headless arena. The per-frame decide() runs on
   // the existing decay-tick cadence; NO LLM in this loop.
   useEffect(() => {
-    if (!personaId) return;
-    const persona = getPersona(personaId);
+    if (!aiPersonaId) return;
+    const persona = getPersona(aiPersonaId);
     if (!persona) return;
     setRight((p) => ({ ...p, name: persona.name }));
     const controller: FighterController = makePersonaController(persona);
-    const rng = makeRng(0xa1 + personaId.length);
+    const rng = makeRng(0xa1 + aiPersonaId.length);
     let tick = 0;
     const timer = setInterval(() => {
       const now = Date.now();
@@ -688,7 +693,7 @@ export function Arena3D() {
       clearInterval(timer);
       aiIntentRef.current = 0;
     };
-  }, [personaId, usableMoves]);
+  }, [aiPersonaId, usableMoves]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -905,7 +910,7 @@ export function Arena3D() {
       let rFwd = 0;
       let rStr = 0;
       if (rightFree) {
-        if (personaId) {
+        if (aiPersonaId) {
           // The AI faces the player, so "advance" is simply walking forward.
           if (aiIntentRef.current === 1) rFwd += 1;
         } else {
@@ -953,7 +958,7 @@ export function Arena3D() {
       setRight((p) => resolve(p, rvx, rvz, rightFacing, leftStateRef.current, ls));
     }, 40);
     return () => clearInterval(timer);
-  }, [personaId, multiplayer.isMultiplayer]);
+  }, [aiPersonaId, multiplayer.isMultiplayer]);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
     if (multiplayer.isMultiplayer) {
@@ -997,8 +1002,8 @@ export function Arena3D() {
   const renderNow = Date.now();
   const leftBusy = renderNow < left.recoverUntil || left.stamina < MIN_STAMINA_TO_ACT;
   const rightBusy = renderNow < right.recoverUntil || right.stamina < MIN_STAMINA_TO_ACT;
-  // Player 2 is auto-piloted while a persona is selected.
-  const rightIsAI = personaId !== "";
+  // Player 2 is auto-piloted while a real AI persona is selected.
+  const rightIsAI = aiPersonaId !== "";
   const shareUrl =
     multiplayer.roomCode && typeof window !== "undefined"
       ? buildArenaShareUrl(multiplayer.roomCode)
@@ -1025,7 +1030,7 @@ export function Arena3D() {
             <p className="text-sm text-[#8888a0]">
               Two G1-inspired fighters face off using scored robot move cards. You are Player{" "}
               {playerNumber}.
-              {vsHuman && (
+              {onlineMode && (
                 <span className="mt-1 block">
                   {multiplayer.status === "connecting" && "Connecting to arena room…"}
                   {multiplayer.status === "waiting" && multiplayer.roomCode &&
@@ -1036,7 +1041,7 @@ export function Arena3D() {
                   )}
                 </span>
               )}
-              {playerSide === "left" && vsHuman && shareUrl && (
+              {playerSide === "left" && onlineMode && shareUrl && (
                 <span className="mt-1 block">
                   Player 2 link:{" "}
                   <code className="break-all rounded bg-black/30 px-1.5 py-0.5 text-[#3dd68c]">
@@ -1061,7 +1066,8 @@ export function Arena3D() {
                   disabled={multiplayer.status === "live"}
                   className="rounded-lg border border-[#2a2a3d] bg-[#14141f] px-3 py-2 text-sm text-[#e8e8f0] outline-none focus:border-[#7c5cff] disabled:opacity-50"
                 >
-                  <option value="">Human opponent (online)</option>
+                  <option value="">Local 2-player (P1 WASD / P2 arrows)</option>
+                  <option value="online">Human opponent (online)</option>
                   {listPersonas().map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
