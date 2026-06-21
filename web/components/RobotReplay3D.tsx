@@ -203,7 +203,7 @@ export function RobotReplay3D({ moveId }: { moveId: string }) {
       renderer.dispose();
       host.removeChild(renderer.domElement);
     };
-  }, [trajectory]);
+  }, [cameraDefault, syncFromScene, trajectory]);
 
   if (error) {
     return (

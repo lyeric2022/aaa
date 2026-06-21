@@ -345,6 +345,8 @@ export function Arena3D() {
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(host.clientWidth, 560);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -360,6 +362,8 @@ export function Arena3D() {
     scene.add(new THREE.AmbientLight("#ffffff", 1.1));
     const key = new THREE.DirectionalLight("#ffffff", 2.4);
     key.position.set(0, 5, 4);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
     scene.add(key);
     const magenta = new THREE.DirectionalLight("#7c5cff", 2);
     magenta.position.set(-3, 2, 1);
