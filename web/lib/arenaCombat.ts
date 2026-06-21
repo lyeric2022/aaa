@@ -39,8 +39,15 @@ export const MIN_STAMINA_TO_ACT = 30;
 const HIT_CONE_COS = 0.57;
 
 // Ring bounds inset (body clearance so the centre stays inside the ropes).
-const BOUND_X = 2.35 - 0.18;
-const BOUND_Z = 1.75 - 0.18;
+export const BOUND_X = 2.35 - 0.18;
+export const BOUND_Z = 1.75 - 0.18;
+// Footwork tuning shared by the local tick and the server room loop.
+export const MOVE_SPEED = 2.3; // walking speed in metres/sec
+export const TURN_RATE = 0.22; // facing rotation fraction per 40ms tick
+export const MIN_GAP = 0.9; // closest the two bodies can get (no overlap)
+
+/** A fighter's footwork intent for one tick (forward/back and strafe, -1..1). */
+export type FootInput = { fwd: number; strafe: number };
 
 export const ARENA_BASICS: ArenaMove[] = [
   { id: "basic_jab",   name: "Quick Jab",      speed: 72, power: 11, balanceRisk: 28, recovery: 64, anim: "jab"     },
@@ -53,8 +60,98 @@ function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
 }
 
-function clampToBox(x: number, z: number, hx: number, hz: number): [number, number] {
+export function clampToBox(x: number, z: number, hx: number, hz: number): [number, number] {
   return [Math.max(-hx, Math.min(hx, x)), Math.max(-hz, Math.min(hz, z))];
+}
+
+/** Shortest-path interpolation between two angles (radians). */
+export function angleLerp(from: number, to: number, t: number): number {
+  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  return from + delta * t;
+}
+
+/** Yaw that points a fighter at (dx, dz). Forward at yaw 0 is +x. */
+export function faceYaw(dx: number, dz: number): number {
+  return Math.atan2(-dz, dx);
+}
+
+/**
+ * Movement vector relative to a fighter's facing: forward/back runs along the
+ * facing, strafe circles around. Normalized so diagonals aren't faster.
+ */
+export function walkVector(facing: number, fwd: number, strafe: number): [number, number] {
+  const fx = Math.cos(facing);
+  const fz = -Math.sin(facing);
+  const rx = -fz; // right-hand perpendicular in the XZ plane
+  const rz = fx;
+  const vx = fwd * fx + strafe * rx;
+  const vz = fwd * fz + strafe * rz;
+  const m = Math.hypot(vx, vz);
+  return m > 0 ? [vx / m, vz / m] : [0, 0];
+}
+
+/**
+ * Apply one footwork step to a fighter: move by (vx, vz) * step, clamp to the
+ * ring, push out of the opponent so the two bodies never overlap, and fold in
+ * the per-tick decay. `other` is the opponent's pre-move state.
+ */
+export function resolveFooting(
+  p: FighterState,
+  vx: number,
+  vz: number,
+  facing: number,
+  other: FighterState,
+  now: number,
+  step: number,
+): FighterState {
+  let [nx, nz] = clampToBox(p.x + vx * step, p.z + vz * step, BOUND_X, BOUND_Z);
+  let dx = nx - other.x;
+  let dz = nz - other.z;
+  let d = Math.hypot(dx, dz);
+  if (d < MIN_GAP) {
+    if (d < 1e-4) {
+      dx = nx >= other.x ? 1 : -1;
+      dz = 0;
+      d = 1;
+    }
+    nx = other.x + (dx / d) * MIN_GAP;
+    nz = other.z + (dz / d) * MIN_GAP;
+    [nx, nz] = clampToBox(nx, nz, BOUND_X, BOUND_Z);
+  }
+  return { ...decayFighter(p, now), x: nx, z: nz, facing, walk: vx || vz ? 1 : 0 };
+}
+
+/**
+ * Advance both fighters one footwork tick from their movement inputs: each
+ * turns to face the other (locked mid-swing), walks per its input (gated to
+ * neutral — alive and not recovering), resolves overlap, and decays. Shared by
+ * the local single-player tick and the authoritative server room loop.
+ */
+export function advanceFooting(
+  left: FighterState,
+  right: FighterState,
+  leftInput: FootInput,
+  rightInput: FootInput,
+  now: number,
+  step: number,
+): { left: FighterState; right: FighterState } {
+  const live = left.hp > 0 && right.hp > 0;
+  const leftFacing = left.attacking
+    ? left.facing
+    : angleLerp(left.facing, faceYaw(right.x - left.x, right.z - left.z), TURN_RATE);
+  const rightFacing = right.attacking
+    ? right.facing
+    : angleLerp(right.facing, faceYaw(left.x - right.x, left.z - right.z), TURN_RATE);
+
+  const lFree = live && now >= left.recoverUntil;
+  const rFree = live && now >= right.recoverUntil;
+  const [lvx, lvz] = walkVector(leftFacing, lFree ? leftInput.fwd : 0, lFree ? leftInput.strafe : 0);
+  const [rvx, rvz] = walkVector(rightFacing, rFree ? rightInput.fwd : 0, rFree ? rightInput.strafe : 0);
+
+  return {
+    left: resolveFooting(left, lvx, lvz, leftFacing, right, now, step),
+    right: resolveFooting(right, rvx, rvz, rightFacing, left, now, step),
+  };
 }
 
 /** Pick an animation archetype from a move's stats profile. */

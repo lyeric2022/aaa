@@ -13,14 +13,21 @@ import type { FighterController } from "@/lib/enemy/types";
 import { announcer, koCall, resetCall } from "@/lib/announcer";
 import {
   ARENA_BASICS,
+  advanceFooting,
+  angleLerp,
   applyMove,
+  BOUND_X,
+  BOUND_Z,
+  clampToBox,
   createFighter,
   decayFighter,
   MIN_STAMINA_TO_ACT,
+  MOVE_SPEED,
   staminaCostFor,
   animForStats,
   type ArenaMove,
   type FighterState,
+  type FootInput,
   type MoveAnim,
   type PlayerSide,
 } from "@/lib/arenaCombat";
@@ -28,12 +35,7 @@ import { applyCameraFrame } from "@/lib/cameraFrame";
 import { useCameraDebug } from "@/lib/useCameraDebug";
 import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
 import { CameraDebugPanel } from "@/components/CameraDebugPanel";
-import {
-  addArenaBackground,
-  applyRopeContacts,
-  RING_HALF_X,
-  RING_HALF_Z,
-} from "@/lib/arenaEnvironment";
+import { addArenaBackground, applyRopeContacts } from "@/lib/arenaEnvironment";
 
 function clamp(value: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, value));
@@ -404,36 +406,10 @@ function setRobotPose(
   if (torso) torso.rotation.z = -punch * 0.12;
 }
 
-// Footwork tuning. Movement is now full 2D on the mat: circle in to land, drift
-// out (or to the flank) to make the opponent whiff. Units are arena metres.
-const MOVE_SPEED = 2.3; // walking speed in metres/sec
-// Fighters are penned inside the rope ring (a small inset keeps their centre in
-// so the body can lean on the ropes but never slip through them).
-const BOUND_X = RING_HALF_X - 0.18;
-const BOUND_Z = RING_HALF_Z - 0.18;
-const MIN_GAP = 0.9; // closest the two bodies can get (no overlap)
-// How fast a fighter can rotate to face the opponent (fraction/40ms tick). A
-// finite turn rate is what lets circling/flanking pull you out of their cone.
-const TURN_RATE = 0.22;
-// Walk-cycle stride frequency (radians/sec at full speed).
+// Walk-cycle stride frequency (radians/sec at full speed). Footwork tuning and
+// the 2D movement math now live in arenaCombat so the local tick and the
+// authoritative server room loop stay in lockstep.
 const STRIDE_FREQ = 9;
-
-// Keep a position inside the rectangular rope ring.
-function clampToBox(x: number, z: number, hx: number, hz: number): [number, number] {
-  return [Math.max(-hx, Math.min(hx, x)), Math.max(-hz, Math.min(hz, z))];
-}
-
-// Shortest-path interpolation between two angles (radians).
-function angleLerp(from: number, to: number, t: number): number {
-  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
-  return from + delta * t;
-}
-
-// Yaw (Three.js Y-rotation) that points a fighter at (dx, dz). Forward at yaw 0
-// is +x, matching the original left-fighter orientation.
-function faceYaw(dx: number, dz: number): number {
-  return Math.atan2(-dz, dx);
-}
 
 export function Arena3D() {
   const router = useRouter();
@@ -851,7 +827,7 @@ export function Arena3D() {
   }, []);
 
   useEffect(() => {
-    if (multiplayer.isMultiplayer) return; // server handles decay in multiplayer
+    if (multiplayer.isMultiplayer) return; // server simulates footwork in multiplayer
     const timer = setInterval(() => {
       const now = Date.now();
       const ls = leftStateRef.current;
@@ -862,103 +838,52 @@ export function Arena3D() {
         return;
       }
 
-      const step = MOVE_SPEED * 0.04; // metres per 40ms tick
+      // P1 always walks with WASD. P2 is either the AI (advance = walk forward)
+      // or the local arrow keys. advanceFooting gates these to neutral and
+      // applies the facing/collision/decay shared with the server.
       const keys = keysRef.current;
-      const live = ls.hp > 0 && rs.hp > 0;
+      const leftInput: FootInput = { fwd: 0, strafe: 0 };
+      if (keys.has("w")) leftInput.fwd += 1;
+      if (keys.has("s")) leftInput.fwd -= 1;
+      if (keys.has("d")) leftInput.strafe += 1;
+      if (keys.has("a")) leftInput.strafe -= 1;
 
-      // Fighters turn to face each other; facing is locked mid-swing so the
-      // direction you committed to is the direction the strike actually goes.
-      const leftFacing = ls.attacking
-        ? ls.facing
-        : angleLerp(ls.facing, faceYaw(rs.x - ls.x, rs.z - ls.z), TURN_RATE);
-      const rightFacing = rs.attacking
-        ? rs.facing
-        : angleLerp(rs.facing, faceYaw(ls.x - rs.x, ls.z - rs.z), TURN_RATE);
-
-      // Movement is relative to each fighter's orientation: forward/back run
-      // along facing (toward/away from the opponent) and strafe circles around
-      // them. Footwork is only allowed in neutral (alive, not recovering). We
-      // normalize so diagonals aren't faster.
-      const walkVector = (
-        facing: number,
-        fwd: number,
-        strafe: number,
-      ): [number, number] => {
-        const fx = Math.cos(facing);
-        const fz = -Math.sin(facing);
-        // Right-hand vector (perpendicular to forward in the XZ plane).
-        const rx = -fz;
-        const rz = fx;
-        const vx = fwd * fx + strafe * rx;
-        const vz = fwd * fz + strafe * rz;
-        const m = Math.hypot(vx, vz);
-        return m > 0 ? [vx / m, vz / m] : [0, 0];
-      };
-
-      const leftFree = live && now >= ls.recoverUntil;
-      let lFwd = 0;
-      let lStr = 0;
-      if (leftFree) {
-        if (keys.has("w")) lFwd += 1;
-        if (keys.has("s")) lFwd -= 1;
-        if (keys.has("d")) lStr += 1;
-        if (keys.has("a")) lStr -= 1;
+      const rightInput: FootInput = { fwd: 0, strafe: 0 };
+      if (aiPersonaId) {
+        if (aiIntentRef.current === 1) rightInput.fwd += 1;
+      } else {
+        if (keys.has("arrowup")) rightInput.fwd += 1;
+        if (keys.has("arrowdown")) rightInput.fwd -= 1;
+        if (keys.has("arrowright")) rightInput.strafe += 1;
+        if (keys.has("arrowleft")) rightInput.strafe -= 1;
       }
-      const [lvx, lvz] = walkVector(leftFacing, lFwd, lStr);
 
-      const rightFree = live && now >= rs.recoverUntil;
-      let rFwd = 0;
-      let rStr = 0;
-      if (rightFree) {
-        if (aiPersonaId) {
-          // The AI faces the player, so "advance" is simply walking forward.
-          if (aiIntentRef.current === 1) rFwd += 1;
-        } else {
-          if (keys.has("arrowup")) rFwd += 1;
-          if (keys.has("arrowdown")) rFwd -= 1;
-          if (keys.has("arrowright")) rStr += 1;
-          if (keys.has("arrowleft")) rStr -= 1;
-        }
-      }
-      const [rvx, rvz] = walkVector(rightFacing, rFwd, rStr);
-
-      // Apply movement as a delta onto each fighter's authoritative state so we
-      // never clobber knockback the strike resolver just wrote. We then clamp to
-      // the mat disk and push out of the opponent (read live from its ref) so the
-      // two bodies never overlap.
-      const resolve = (
-        p: FighterState,
-        vx: number,
-        vz: number,
-        facing: number,
-        other: FighterState | null,
-        fallback: FighterState,
-      ): FighterState => {
-        let [nx, nz] = clampToBox(p.x + vx * step, p.z + vz * step, BOUND_X, BOUND_Z);
-        const ox = other?.x ?? fallback.x;
-        const oz = other?.z ?? fallback.z;
-        let dx = nx - ox;
-        let dz = nz - oz;
-        let d = Math.hypot(dx, dz);
-        if (d < MIN_GAP) {
-          if (d < 1e-4) {
-            // Exactly overlapping (shouldn't normally happen): nudge sideways.
-            dx = nx >= ox ? 1 : -1;
-            dz = 0;
-            d = 1;
-          }
-          nx = ox + (dx / d) * MIN_GAP;
-          nz = oz + (dz / d) * MIN_GAP;
-          [nx, nz] = clampToBox(nx, nz, BOUND_X, BOUND_Z);
-        }
-        return { ...decayFighter(p, now), x: nx, z: nz, facing, walk: vx || vz ? 1 : 0 };
-      };
-
-      setLeft((p) => resolve(p, lvx, lvz, leftFacing, rightStateRef.current, rs));
-      setRight((p) => resolve(p, rvx, rvz, rightFacing, leftStateRef.current, ls));
+      const next = advanceFooting(ls, rs, leftInput, rightInput, now, MOVE_SPEED * 0.04);
+      setLeft(next.left);
+      setRight(next.right);
     }, 40);
     return () => clearInterval(timer);
   }, [aiPersonaId, multiplayer.isMultiplayer]);
+
+  // In online play, stream this client's footwork intent to the server (which
+  // simulates it authoritatively). We read both WASD and arrows so each player
+  // drives their own fighter however they like; the hook dedupes by direction.
+  useEffect(() => {
+    if (!multiplayer.isMultiplayer) return;
+    const timer = setInterval(() => {
+      const keys = keysRef.current;
+      const input: FootInput = { fwd: 0, strafe: 0 };
+      if (keys.has("w") || keys.has("arrowup")) input.fwd += 1;
+      if (keys.has("s") || keys.has("arrowdown")) input.fwd -= 1;
+      if (keys.has("d") || keys.has("arrowright")) input.strafe += 1;
+      if (keys.has("a") || keys.has("arrowleft")) input.strafe -= 1;
+      multiplayer.sendInput(input);
+    }, 60);
+    return () => clearInterval(timer);
+    // sendInput is a stable useCallback; depending on the whole multiplayer
+    // object would recreate this interval on every snapshot (~25Hz).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multiplayer.isMultiplayer, multiplayer.sendInput]);
 
   function playMove(side: PlayerSide, move: ArenaMove) {
     if (multiplayer.isMultiplayer) {

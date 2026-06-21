@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ArenaRoomSnapshot } from "@/lib/arenaRoomStore";
-import type { ArenaMove, FighterState, PlayerSide } from "@/lib/arenaCombat";
+import type { ArenaMove, FighterState, FootInput, PlayerSide } from "@/lib/arenaCombat";
 
 const TOKEN_PREFIX = "arena-token:";
 
@@ -163,6 +163,27 @@ export function useArenaMultiplayer({
     [roomCode, token, applySnapshot],
   );
 
+  // Stream this player's footwork intent to the server. Deduped so we only POST
+  // when the held direction actually changes (key down/up), not every frame.
+  const lastInputRef = useRef<string>("0,0");
+  const sendInput = useCallback(
+    (input: FootInput) => {
+      if (!roomCode || !token) return;
+      const sig = `${input.fwd},${input.strafe}`;
+      if (sig === lastInputRef.current) return;
+      lastInputRef.current = sig;
+      void fetch(`/api/arena/room/${roomCode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-arena-token": token },
+        body: JSON.stringify({ action: "input", input }),
+      }).catch(() => {
+        // Let the next change retry; movement is best-effort.
+        lastInputRef.current = "";
+      });
+    },
+    [roomCode, token],
+  );
+
   const resetRemote = useCallback(async () => {
     if (!roomCode || !token) return false;
     const res = await fetch(`/api/arena/room/${roomCode}`, {
@@ -196,6 +217,7 @@ export function useArenaMultiplayer({
     token,
     snapshot,
     playRemoteMove,
+    sendInput,
     resetRemote,
     setOnLogLine,
     fightersFromSnapshot,
