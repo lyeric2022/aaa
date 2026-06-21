@@ -27,6 +27,9 @@ export function MoveCardView({
     <div className="bg-[#14141f] border border-[#2a2a3d] rounded-2xl p-6">
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <VerdictBadge verdict={card.verdict} />
+        <span className="text-xs px-2 py-1 rounded bg-[#8888a0]/10 text-[#8888a0]">
+          Heuristic baseline
+        </span>
         {card.studio_sonic_validated && (
           <span className="text-xs px-2 py-1 rounded bg-[#7c5cff]/20 text-[#7c5cff]">
             Studio SONIC ✓
@@ -58,8 +61,9 @@ export function MoveCardView({
         info={STAT_INFO.deployability}
       />
 
-      <div className="mt-4 p-4 bg-[#7c5cff]/10 border-l-2 border-[#7c5cff] rounded-r-lg text-sm leading-relaxed">
-        <strong className="text-[#a78bfa]">Coach:</strong> {card.coach_feedback}
+      <div className="mt-4 p-4 bg-[#8888a0]/10 border-l-2 border-[#8888a0] rounded-r-lg text-sm leading-relaxed text-[#b7b7c8]">
+        <strong className="text-[#c8c8d4]">Static baseline note:</strong>{" "}
+        {card.coach_feedback}
       </div>
 
       {motionStats && (
