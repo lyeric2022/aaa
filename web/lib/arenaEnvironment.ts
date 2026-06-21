@@ -102,7 +102,41 @@ function addLightBar(
   scene.add(glow);
 }
 
-function addRingRopes(scene: THREE.Scene) {
+/** The squared ring the ropes enclose (half-extents on x / z). Fighters stay
+ * inside this so they can lean on the ropes but never pass through them. */
+export const RING_HALF_X = 2.35;
+export const RING_HALF_Z = 1.75;
+
+/** A single rope segment whose geometry we bow inward/outward on contact. */
+export interface RopeHandle {
+  mesh: THREE.Mesh;
+  /** Pristine vertex positions, restored when no fighter is touching. */
+  rest: Float32Array;
+  /** World axis the rope runs along. */
+  runAxis: "x" | "z";
+  /** Maps a vertex's local Y to its world run coordinate (worldRun = sign*localY). */
+  runSign: number;
+  /** World axis the rope bows along (away from the ring centre). */
+  outwardAxis: "x" | "z";
+  outwardSign: number;
+  /** |fixed coordinate| of the rope line on its outward axis. */
+  fixedAbs: number;
+  /** Local geometry axis (x or z) that corresponds to the outward direction. */
+  localBulgeAxis: "x" | "z";
+  dirty: boolean;
+}
+
+// How the ropes give when a fighter presses into them.
+const ROPE_CONTACT_REACH = 0.85; // how far in from the rope contact begins (m)
+const ROPE_MAX_BULGE = 0.14; // peak outward displacement (m)
+const ROPE_SIGMA = 0.6; // width of the bow along the rope (m)
+
+function smooth01(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return c * c * (3 - 2 * c);
+}
+
+function addRingRopes(scene: THREE.Scene): RopeHandle[] {
   const postMaterial = material("#181d2a", "#222943", 0.35, 0.55, 0.32);
   const ropeMaterials = [
     material("#2b2448", "#7c5cff", 0.65, 0.25, 0.28),
@@ -110,10 +144,10 @@ function addRingRopes(scene: THREE.Scene) {
   ];
 
   const corners: THREE.Vector3Tuple[] = [
-    [-2.35, 0, -1.75],
-    [2.35, 0, -1.75],
-    [2.35, 0, 1.75],
-    [-2.35, 0, 1.75],
+    [-RING_HALF_X, 0, -RING_HALF_Z],
+    [RING_HALF_X, 0, -RING_HALF_Z],
+    [RING_HALF_X, 0, RING_HALF_Z],
+    [-RING_HALF_X, 0, RING_HALF_Z],
   ];
 
   for (const [x, , z] of corners) {
@@ -130,6 +164,7 @@ function addRingRopes(scene: THREE.Scene) {
     [corners[3], corners[0]],
   ];
 
+  const handles: RopeHandle[] = [];
   for (const y of [0.58, 0.84, 1.1]) {
     ropeSegments.forEach(([a, b], i) => {
       const start = new THREE.Vector3(a[0], y, a[2]);
@@ -137,15 +172,88 @@ function addRingRopes(scene: THREE.Scene) {
       const mid = start.clone().lerp(end, 0.5);
       const length = start.distanceTo(end);
       const horizontal = Math.abs(a[0] - b[0]) > Math.abs(a[2] - b[2]);
-      const rope = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.018, 0.018, length, 12),
-        ropeMaterials[i % ropeMaterials.length],
-      );
+      // Extra length segments give the rope enough vertices to bow smoothly.
+      const geometry = new THREE.CylinderGeometry(0.018, 0.018, length, 8, 28);
+      const rope = new THREE.Mesh(geometry, ropeMaterials[i % ropeMaterials.length]);
       rope.position.copy(mid);
       rope.rotation.z = horizontal ? Math.PI / 2 : 0;
       rope.rotation.x = horizontal ? 0 : Math.PI / 2;
       scene.add(rope);
+
+      const rest = (geometry.attributes.position.array as Float32Array).slice();
+      handles.push(
+        horizontal
+          ? {
+              mesh: rope,
+              rest,
+              runAxis: "x",
+              runSign: -1, // rotation.z = +90° sends local +Y to world -X
+              outwardAxis: "z",
+              outwardSign: Math.sign(mid.z) || 1,
+              fixedAbs: Math.abs(mid.z),
+              localBulgeAxis: "z",
+              dirty: false,
+            }
+          : {
+              mesh: rope,
+              rest,
+              runAxis: "z",
+              runSign: 1, // rotation.x = +90° sends local +Y to world +Z
+              outwardAxis: "x",
+              outwardSign: Math.sign(mid.x) || 1,
+              fixedAbs: Math.abs(mid.x),
+              localBulgeAxis: "x",
+              dirty: false,
+            },
+      );
     });
+  }
+  return handles;
+}
+
+/**
+ * Bow each rope outward where a fighter leans into it. Recomputed from the rest
+ * pose every frame so the deformation tracks the fighter and relaxes when they
+ * step away. `fighters` are the live mat positions (x, z).
+ */
+export function applyRopeContacts(
+  ropes: RopeHandle[],
+  fighters: { x: number; z: number }[],
+) {
+  for (const rope of ropes) {
+    const contacts: { run: number; press: number }[] = [];
+    for (const f of fighters) {
+      const out = (rope.outwardAxis === "x" ? f.x : f.z) * rope.outwardSign;
+      const press = smooth01((out - (rope.fixedAbs - ROPE_CONTACT_REACH)) / ROPE_CONTACT_REACH);
+      if (press > 0.001) {
+        contacts.push({ run: rope.runAxis === "x" ? f.x : f.z, press });
+      }
+    }
+
+    const attr = rope.mesh.geometry.attributes.position;
+    const arr = attr.array as Float32Array;
+    if (contacts.length === 0) {
+      if (rope.dirty) {
+        arr.set(rope.rest);
+        attr.needsUpdate = true;
+        rope.dirty = false;
+      }
+      continue;
+    }
+
+    const bulgeIdx = rope.localBulgeAxis === "x" ? 0 : 2;
+    for (let i = 0; i < arr.length; i += 3) {
+      const worldRun = rope.runSign * rope.rest[i + 1];
+      let weight = 0;
+      for (const c of contacts) {
+        const d = worldRun - c.run;
+        const g = Math.exp(-(d * d) / (2 * ROPE_SIGMA * ROPE_SIGMA)) * c.press;
+        if (g > weight) weight = g;
+      }
+      arr[i + bulgeIdx] = rope.rest[i + bulgeIdx] + rope.outwardSign * ROPE_MAX_BULGE * weight;
+    }
+    attr.needsUpdate = true;
+    rope.dirty = true;
   }
 }
 
@@ -273,7 +381,7 @@ export function addArenaBackground(scene: THREE.Scene) {
   addLightBar(scene, -5.15, -0.65, "#7c5cff", Math.PI / 8);
   addLightBar(scene, 5.15, -0.65, "#7c5cff", -Math.PI / 8);
 
-  addRingRopes(scene);
+  const ropes = addRingRopes(scene);
   addAudienceLights(scene);
   addAtmosphere(scene);
 
@@ -297,6 +405,7 @@ export function addArenaBackground(scene: THREE.Scene) {
   scene.add(grid);
 
   return {
+    ropes,
     dispose: () => {
       scene.fog = null;
     },

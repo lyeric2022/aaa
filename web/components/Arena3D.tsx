@@ -13,7 +13,12 @@ import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
 import { applyCameraFrame } from "@/lib/cameraFrame";
 import { useCameraDebug } from "@/lib/useCameraDebug";
 import { CameraDebugPanel } from "@/components/CameraDebugPanel";
-import { addArenaBackground } from "@/lib/arenaEnvironment";
+import {
+  addArenaBackground,
+  applyRopeContacts,
+  RING_HALF_X,
+  RING_HALF_Z,
+} from "@/lib/arenaEnvironment";
 
 type PlayerSide = "left" | "right";
 
@@ -27,7 +32,13 @@ type FighterState = {
   balance: number;
   /** 0-100; spent to attack, regenerates while idle. */
   stamina: number;
+  /** Floor position on the mat (x = left/right, z = depth toward/away camera). */
   x: number;
+  z: number;
+  /** Yaw in radians; the fighter turns to face its opponent. */
+  facing: number;
+  /** 1 while actively walking this tick, 0 otherwise (drives the walk cycle). */
+  walk: number;
   attacking: boolean;
   attackSide: PlayerSide | null;
   attackStart: number;
@@ -352,32 +363,55 @@ function crouchDepth(anim: MoveAnim): number {
   return 0;
 }
 
+// Additive walk-cycle joint offsets at a given phase: hips and the opposite
+// arms swing out of phase, knees bend on the trailing leg — enough to read as a
+// natural stride. Scaled by intensity at the call site.
+function strideOffsets(phase: number): JointMap {
+  const s = Math.sin(phase);
+  return {
+    left_hip_pitch_joint: 0.55 * s,
+    right_hip_pitch_joint: -0.55 * s,
+    left_knee_joint: 0.4 * Math.max(0, -s),
+    right_knee_joint: 0.4 * Math.max(0, s),
+    left_shoulder_pitch_joint: -0.4 * s,
+    right_shoulder_pitch_joint: 0.4 * s,
+    waist_roll_joint: 0.05 * s,
+  };
+}
+
 function setRobotPose(
   robot: THREE.Group,
-  side: PlayerSide,
   attackProgress: number,
   hitFlash: number,
   anim: MoveAnim | null,
+  walkPhase: number,
+  walkIntensity: number,
 ) {
-  const direction = side === "left" ? 1 : -1;
-  robot.rotation.y = side === "left" ? 0 : Math.PI;
-
   const punch = anim ? Math.sin(Math.min(1, attackProgress) * Math.PI) : 0;
+  // Walking is suppressed while a strike is at full extension so the swing
+  // reads cleanly, then blends back in as the fighter returns to neutral.
+  const stride = walkIntensity * (1 - punch);
+
   const flashBob = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
   const crouch = anim ? crouchDepth(anim) * punch : 0;
-  robot.position.y = flashBob - crouch;
+  const bob = stride > 0.001 ? Math.abs(Math.sin(walkPhase)) * 0.03 * stride : 0;
+  robot.position.y = flashBob - crouch + bob;
   robot.scale.setScalar(1 + punch * 0.04);
 
   const urdf = robot.userData.urdf as URDFRobotLike | undefined;
   if (urdf?.setJointValue) {
-    const targets = anim ? poseTargets(anim, direction) : null;
-    // Blend neutral guard -> archetype peak by the swing envelope. Joints not
-    // named by an archetype fall back to the neutral value, which keeps the
-    // rest of the body stable instead of snapping to zero.
+    // Both fighters now rotate to face their opponent, so the pose is authored
+    // once in the local frame (forward = local +x) with no left/right mirror.
+    const targets = anim ? poseTargets(anim, 1) : null;
+    const walk = stride > 0.001 ? strideOffsets(walkPhase) : null;
+    // Blend neutral guard -> archetype peak by the swing envelope, then add the
+    // scaled walk stride on top. Joints not named by an archetype fall back to
+    // neutral, keeping the rest of the body stable instead of snapping to zero.
     for (const joint of POSE_JOINTS) {
       const base = NEUTRAL_GUARD[joint] ?? 0;
       const peak = targets?.[joint] ?? base;
-      urdf.setJointValue(joint, base + (peak - base) * punch);
+      const walkAdd = walk ? (walk[joint] ?? 0) * stride : 0;
+      urdf.setJointValue(joint, base + (peak - base) * punch + walkAdd);
     }
   }
 
@@ -389,18 +423,18 @@ function setRobotPose(
   const leftFore = robot.getObjectByName("leftForearm");
   const torso = robot.getObjectByName("torso");
   if (rightUpper) {
-    rightUpper.position.z = punch * 0.52 * direction;
+    rightUpper.position.z = punch * 0.52;
     rightUpper.position.x = 0.36 + punch * 0.16;
     rightUpper.rotation.x = punch * 1.7;
   }
   if (rightFore) {
-    rightFore.position.z = punch * 0.95 * direction;
+    rightFore.position.z = punch * 0.95;
     rightFore.position.x = 0.47 + punch * 0.28;
     rightFore.rotation.x = punch * 2.1;
   }
   if (leftUpper) leftUpper.rotation.x = -0.35 - punch * 0.4;
   if (leftFore) leftFore.rotation.x = -0.45 - punch * 0.3;
-  if (torso) torso.rotation.z = -punch * 0.12 * direction;
+  if (torso) torso.rotation.z = -punch * 0.12;
 }
 
 // Damage scales hard with power, so a heavy move is a real payoff — picking the
@@ -431,19 +465,47 @@ function recoveryMsFor(move: ArenaMove) {
 // Below this you're too winded to act and must rest (visible breather windows).
 const MIN_STAMINA_TO_ACT = 30;
 
-// Footwork tuning. Movement is the neutral game: walk in to land, walk out to
-// make the opponent whiff. Units are arena metres.
+// Footwork tuning. Movement is now full 2D on the mat: circle in to land, drift
+// out (or to the flank) to make the opponent whiff. Units are arena metres.
 const MOVE_SPEED = 2.3; // walking speed in metres/sec
-const ARENA_BOUND = 2.15; // farthest each fighter can stand from centre
-const MIN_GAP = 0.92; // closest the two bodies can get (no overlap)
+// Fighters are penned inside the rope ring (a small inset keeps their centre in
+// so the body can lean on the ropes but never slip through them).
+const BOUND_X = RING_HALF_X - 0.18;
+const BOUND_Z = RING_HALF_Z - 0.18;
+const MIN_GAP = 0.9; // closest the two bodies can get (no overlap)
 // A committed strike lunges forward, so its effective reach is a bit longer
 // than the standing pose. This keeps the pocket generous enough to fight in.
 const LUNGE_REACH = 0.5;
+// How fast a fighter can rotate to face the opponent (fraction/40ms tick). A
+// finite turn rate is what lets circling/flanking pull you out of their cone.
+const TURN_RATE = 0.22;
+// A strike only connects inside this frontal cone, so which way you are facing
+// when you commit decides whether the swing lands. cos(~55°).
+const HIT_CONE_COS = 0.57;
+// Walk-cycle stride frequency (radians/sec at full speed).
+const STRIDE_FREQ = 9;
 
 // How far a move can connect, mirroring the enemy brain's movePhysics().range
 // so the AI and the player share one notion of "in range".
 function reachFor(move: ArenaMove) {
   return 0.6 + move.speed * 0.012 + move.power * 0.004 + LUNGE_REACH;
+}
+
+// Keep a position inside the rectangular rope ring.
+function clampToBox(x: number, z: number, hx: number, hz: number): [number, number] {
+  return [Math.max(-hx, Math.min(hx, x)), Math.max(-hz, Math.min(hz, z))];
+}
+
+// Shortest-path interpolation between two angles (radians).
+function angleLerp(from: number, to: number, t: number): number {
+  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  return from + delta * t;
+}
+
+// Yaw (Three.js Y-rotation) that points a fighter at (dx, dz). Forward at yaw 0
+// is +x, matching the original left-fighter orientation.
+function faceYaw(dx: number, dz: number): number {
+  return Math.atan2(-dz, dx);
 }
 
 export function Arena3D() {
@@ -458,7 +520,8 @@ export function Arena3D() {
   const playMoveRef = useRef<((side: PlayerSide, move: ArenaMove) => void) | null>(null);
   // Currently-held movement keys (lowercased). Read by the movement tick.
   const keysRef = useRef<Set<string>>(new Set());
-  // The AI's current walk intent for Player 2: -1 left, +1 right, 0 hold.
+  // The AI's current walk intent for Player 2: 1 = advance toward the player,
+  // 0 = hold position. The movement tick turns "advance" into a 2D step.
   const aiIntentRef = useRef<number>(0);
   const [moves, setMoves] = useState<ArenaMove[]>([]);
   const [deckCards, setDeckCards] = useState<MoveCard[]>([]);
@@ -469,6 +532,9 @@ export function Arena3D() {
     balance: 100,
     stamina: 100,
     x: -1.15,
+    z: 0,
+    facing: 0,
+    walk: 0,
     attacking: false,
     attackSide: null,
     attackStart: 0,
@@ -483,6 +549,9 @@ export function Arena3D() {
     balance: 100,
     stamina: 100,
     x: 1.15,
+    z: 0,
+    facing: Math.PI,
+    walk: 0,
     attacking: false,
     attackSide: null,
     attackStart: 0,
@@ -509,15 +578,25 @@ export function Arena3D() {
     announcer.setEnabled(announcerOn);
   }, [announcerOn]);
 
-  // Footwork input: A/D walk Player 1, Left/Right arrows walk Player 2. We only
-  // track which keys are held here; the movement tick turns that into motion.
+  // Footwork input: WASD walks Player 1, the arrow keys walk Player 2, both
+  // across the full mat. We only track which keys are held here; the movement
+  // tick turns that into motion.
   useEffect(() => {
-    const tracked = new Set(["a", "d", "arrowleft", "arrowright"]);
+    const tracked = new Set([
+      "w",
+      "a",
+      "s",
+      "d",
+      "arrowup",
+      "arrowdown",
+      "arrowleft",
+      "arrowright",
+    ]);
     const onDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
       if (!tracked.has(key)) return;
       // Stop the arrow keys from scrolling the page while fighting.
-      if (key === "arrowleft" || key === "arrowright") e.preventDefault();
+      if (key.startsWith("arrow")) e.preventDefault();
       keysRef.current.add(key);
     };
     const onUp = (e: KeyboardEvent) => keysRef.current.delete(e.key.toLowerCase());
@@ -658,10 +737,10 @@ export function Arena3D() {
             stance: ls.attacking ? "extended" : ls.stance,
           },
           deck,
-          // Real spacing now: the gap between the fighters drives the brain, so
-          // the executor walks the enemy into reach ("advance") and only throws
-          // ("move") once a strike can actually land.
-          range: Math.abs(ls.x - rs.x),
+          // Real spacing now: the 2D gap between the fighters drives the brain,
+          // so the executor walks the enemy into reach ("advance") and only
+          // throws ("move") once a strike can actually land.
+          range: Math.hypot(ls.x - rs.x, ls.z - rs.z),
         },
         rng,
       );
@@ -672,8 +751,9 @@ export function Arena3D() {
         aiIntentRef.current = 0;
         if (am && rs.stamina >= staminaCostFor(am)) playMoveRef.current?.("right", am);
       } else if (action.kind === "advance") {
-        // Out of range: step toward the player until a strike can connect.
-        aiIntentRef.current = ls.x < rs.x ? -1 : 1;
+        // Out of range: close in on the player until a strike can connect (the
+        // movement tick steps straight toward them across the mat).
+        aiIntentRef.current = 1;
       } else {
         aiIntentRef.current = 0; // wait / space
       }
@@ -688,7 +768,7 @@ export function Arena3D() {
     if (!hostRef.current) return;
     const host = hostRef.current;
     const scene = new THREE.Scene();
-    addArenaBackground(scene);
+    const env = addArenaBackground(scene);
 
     const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
 
@@ -724,8 +804,10 @@ export function Arena3D() {
 
     const leftBot = makeRobot("#3dd68c");
     const rightBot = makeRobot("#ff5c5c");
-    leftBot.position.x = left.x;
-    rightBot.position.x = right.x;
+    leftBot.position.set(left.x, 0, left.z);
+    leftBot.rotation.y = left.facing;
+    rightBot.position.set(right.x, 0, right.z);
+    rightBot.rotation.y = right.facing;
     scene.add(leftBot, rightBot);
     leftRobot.current = leftBot;
     rightRobot.current = rightBot;
@@ -740,40 +822,74 @@ export function Arena3D() {
     rightImpactRef.current = rightImpact;
 
     let raf = 0;
+    let lastT = 0;
     const clock = new THREE.Clock();
+
+    // Drives one fighter's transform + pose each frame, returning its attack
+    // progress and forward vector so the caller can place the impact spark.
+    const driveBot = (
+      bot: THREE.Group,
+      state: FighterState,
+      attackMatches: boolean,
+      dt: number,
+    ) => {
+      const progress = attackMatches
+        ? Math.min(1, (Date.now() - state.attackStart) / 520)
+        : 0;
+
+      // Turn smoothly toward the authoritative facing (locked mid-swing).
+      bot.rotation.y = angleLerp(bot.rotation.y, state.facing, 0.35);
+      const fwdX = Math.cos(bot.rotation.y);
+      const fwdZ = -Math.sin(bot.rotation.y);
+
+      // Lunge forward along the current facing during a strike.
+      const lunge = progress * (1 - progress) * 1.5;
+      const targetX = state.x + fwdX * lunge;
+      const targetZ = state.z + fwdZ * lunge;
+      bot.position.x = THREE.MathUtils.lerp(bot.position.x, targetX, 0.3);
+      bot.position.z = THREE.MathUtils.lerp(bot.position.z, targetZ, 0.3);
+
+      // Walk cycle: advance phase only while actually moving so strides flow
+      // with held keys. Intensity eases in/out for a smooth start and stop.
+      const ud = bot.userData;
+      const walkInt = THREE.MathUtils.lerp((ud.walkInt as number) ?? 0, state.walk, 0.18);
+      ud.walkInt = walkInt;
+      const phase = ((ud.walkPhase as number) ?? 0) + dt * STRIDE_FREQ * walkInt;
+      ud.walkPhase = phase;
+
+      setRobotPose(bot, progress, state.hitFlash, state.attackAnim, phase, walkInt);
+      return { progress, fwdX, fwdZ };
+    };
+
+    const placeImpact = (
+      impact: THREE.Mesh | null,
+      bot: THREE.Group,
+      fwdX: number,
+      fwdZ: number,
+      progress: number,
+    ) => {
+      if (!impact) return;
+      impact.visible = progress > 0.2 && progress < 0.82;
+      impact.position.set(bot.position.x + fwdX * 0.78, 1.35, bot.position.z + fwdZ * 0.78);
+      impact.scale.setScalar(0.6 + progress * 2.2);
+    };
+
     const loop = () => {
       raf = requestAnimationFrame(loop);
       const t = clock.getElapsedTime();
+      const dt = Math.min(0.05, t - lastT);
+      lastT = t;
       const leftState = leftStateRef.current ?? left;
       const rightState = rightStateRef.current ?? right;
-      const leftProgress =
-        leftState.attackSide === "left"
-          ? Math.min(1, (Date.now() - leftState.attackStart) / 520)
-          : 0;
-      const rightProgress =
-        rightState.attackSide === "right"
-          ? Math.min(1, (Date.now() - rightState.attackStart) / 520)
-          : 0;
 
-      const leftLunge = leftProgress * (1 - leftProgress) * 1.5;
-      const rightLunge = rightProgress * (1 - rightProgress) * 1.5;
-      leftBot.position.x = THREE.MathUtils.lerp(leftBot.position.x, leftState.x + leftLunge, 0.28);
-      rightBot.position.x = THREE.MathUtils.lerp(rightBot.position.x, rightState.x - rightLunge, 0.28);
-      leftBot.position.z = Math.sin(t * 2.2) * 0.015;
-      rightBot.position.z = -Math.sin(t * 2.1) * 0.015;
-      setRobotPose(leftBot, "left", leftProgress, leftState.hitFlash, leftState.attackAnim);
-      setRobotPose(rightBot, "right", rightProgress, rightState.hitFlash, rightState.attackAnim);
+      const l = driveBot(leftBot, leftState, leftState.attackSide === "left", dt);
+      const r = driveBot(rightBot, rightState, rightState.attackSide === "right", dt);
+      placeImpact(leftImpact, leftBot, l.fwdX, l.fwdZ, l.progress);
+      placeImpact(rightImpact, rightBot, r.fwdX, r.fwdZ, r.progress);
 
-      if (leftImpact) {
-        leftImpact.visible = leftProgress > 0.2 && leftProgress < 0.82;
-        leftImpact.position.set(leftBot.position.x + 0.78, 1.35, 0);
-        leftImpact.scale.setScalar(0.6 + leftProgress * 2.2);
-      }
-      if (rightImpact) {
-        rightImpact.visible = rightProgress > 0.2 && rightProgress < 0.82;
-        rightImpact.position.set(rightBot.position.x - 0.78, 1.35, 0);
-        rightImpact.scale.setScalar(0.6 + rightProgress * 2.2);
-      }
+      // Bow the ropes wherever a fighter is leaning on the ring.
+      applyRopeContacts(env.ropes, [leftBot.position, rightBot.position]);
+
       controls.update();
       syncFromScene(camera, controls);
       renderer.render(scene, camera);
@@ -829,40 +945,96 @@ export function Arena3D() {
       const keys = keysRef.current;
       const live = ls.hp > 0 && rs.hp > 0;
 
-      // Footwork is only allowed in neutral: not mid-commit/recovery, match live.
-      let leftDir = 0;
-      if (live && now >= ls.recoverUntil) {
-        if (keys.has("a")) leftDir -= 1;
-        if (keys.has("d")) leftDir += 1;
+      // Fighters turn to face each other; facing is locked mid-swing so the
+      // direction you committed to is the direction the strike actually goes.
+      const leftFacing = ls.attacking
+        ? ls.facing
+        : angleLerp(ls.facing, faceYaw(rs.x - ls.x, rs.z - ls.z), TURN_RATE);
+      const rightFacing = rs.attacking
+        ? rs.facing
+        : angleLerp(rs.facing, faceYaw(ls.x - rs.x, ls.z - rs.z), TURN_RATE);
+
+      // Movement is relative to each fighter's orientation: forward/back run
+      // along facing (toward/away from the opponent) and strafe circles around
+      // them. Footwork is only allowed in neutral (alive, not recovering). We
+      // normalize so diagonals aren't faster.
+      const walkVector = (
+        facing: number,
+        fwd: number,
+        strafe: number,
+      ): [number, number] => {
+        const fx = Math.cos(facing);
+        const fz = -Math.sin(facing);
+        // Right-hand vector (perpendicular to forward in the XZ plane).
+        const rx = -fz;
+        const rz = fx;
+        const vx = fwd * fx + strafe * rx;
+        const vz = fwd * fz + strafe * rz;
+        const m = Math.hypot(vx, vz);
+        return m > 0 ? [vx / m, vz / m] : [0, 0];
+      };
+
+      const leftFree = live && now >= ls.recoverUntil;
+      let lFwd = 0;
+      let lStr = 0;
+      if (leftFree) {
+        if (keys.has("w")) lFwd += 1;
+        if (keys.has("s")) lFwd -= 1;
+        if (keys.has("d")) lStr += 1;
+        if (keys.has("a")) lStr -= 1;
       }
-      // Player 2 walks from the arrow keys, or from the AI's intent when a
-      // persona is piloting it.
-      let rightDir = 0;
-      if (live && now >= rs.recoverUntil) {
+      const [lvx, lvz] = walkVector(leftFacing, lFwd, lStr);
+
+      const rightFree = live && now >= rs.recoverUntil;
+      let rFwd = 0;
+      let rStr = 0;
+      if (rightFree) {
         if (personaId) {
-          rightDir = aiIntentRef.current;
+          // The AI faces the player, so "advance" is simply walking forward.
+          if (aiIntentRef.current === 1) rFwd += 1;
         } else {
-          if (keys.has("arrowleft")) rightDir -= 1;
-          if (keys.has("arrowright")) rightDir += 1;
+          if (keys.has("arrowup")) rFwd += 1;
+          if (keys.has("arrowdown")) rFwd -= 1;
+          if (keys.has("arrowright")) rStr += 1;
+          if (keys.has("arrowleft")) rStr -= 1;
         }
       }
+      const [rvx, rvz] = walkVector(rightFacing, rFwd, rStr);
 
       // Apply movement as a delta onto each fighter's authoritative state so we
-      // never clobber knockback the strike resolver just wrote. The opponent's
-      // current position (from its ref) caps how far we can step toward it, so
-      // bodies never overlap and the left fighter stays on the left.
-      setLeft((p) => {
-        let nx = clamp(p.x + leftDir * step, -ARENA_BOUND, ARENA_BOUND);
-        const otherX = rightStateRef.current?.x ?? rs.x;
-        nx = Math.min(nx, otherX - MIN_GAP);
-        return { ...decay(p), x: nx };
-      });
-      setRight((p) => {
-        let nx = clamp(p.x + rightDir * step, -ARENA_BOUND, ARENA_BOUND);
-        const otherX = leftStateRef.current?.x ?? ls.x;
-        nx = Math.max(nx, otherX + MIN_GAP);
-        return { ...decay(p), x: nx };
-      });
+      // never clobber knockback the strike resolver just wrote. We then clamp to
+      // the mat disk and push out of the opponent (read live from its ref) so the
+      // two bodies never overlap.
+      const resolve = (
+        p: FighterState,
+        vx: number,
+        vz: number,
+        facing: number,
+        other: FighterState | null,
+        fallback: FighterState,
+      ): FighterState => {
+        let [nx, nz] = clampToBox(p.x + vx * step, p.z + vz * step, BOUND_X, BOUND_Z);
+        const ox = other?.x ?? fallback.x;
+        const oz = other?.z ?? fallback.z;
+        let dx = nx - ox;
+        let dz = nz - oz;
+        let d = Math.hypot(dx, dz);
+        if (d < MIN_GAP) {
+          if (d < 1e-4) {
+            // Exactly overlapping (shouldn't normally happen): nudge sideways.
+            dx = nx >= ox ? 1 : -1;
+            dz = 0;
+            d = 1;
+          }
+          nx = ox + (dx / d) * MIN_GAP;
+          nz = oz + (dz / d) * MIN_GAP;
+          [nx, nz] = clampToBox(nx, nz, BOUND_X, BOUND_Z);
+        }
+        return { ...decay(p), x: nx, z: nz, facing, walk: vx || vz ? 1 : 0 };
+      };
+
+      setLeft((p) => resolve(p, lvx, lvz, leftFacing, rightStateRef.current, rs));
+      setRight((p) => resolve(p, rvx, rvz, rightFacing, leftStateRef.current, ls));
     }, 40);
     return () => clearInterval(timer);
   }, [personaId]);
@@ -894,15 +1066,26 @@ export function Arena3D() {
       stance: "recovering",
     });
 
-    // Spacing check: the strike only lands if the opponent is within reach.
-    // Out of range it whiffs — the attacker still commits (stamina + recovery
-    // lockout), which is the price of throwing into open air and the window the
-    // opponent punishes. This is what makes footwork matter.
-    const gap = Math.abs(ls.x - rs.x);
-    if (gap > reachFor(move)) {
+    // Spacing + aim check on the 2D mat. The strike lands only if the opponent
+    // is within reach AND inside the attacker's frontal cone — so both distance
+    // and which way you are facing (the swing direction) decide the hit. A miss
+    // still commits the attacker (stamina + recovery lockout): the price of
+    // throwing into open air, and the window the opponent punishes.
+    const dx = defenderState.x - attacker.x;
+    const dz = defenderState.z - attacker.z;
+    const gap = Math.hypot(dx, dz) || 1e-4;
+    const fwdX = Math.cos(attacker.facing);
+    const fwdZ = -Math.sin(attacker.facing);
+    const aimDot = (fwdX * dx + fwdZ * dz) / gap; // cos(angle facing→opponent)
+    const inReach = gap <= reachFor(move);
+    const inFront = aimDot >= HIT_CONE_COS;
+    if (!inReach || !inFront) {
       if (side === "left") setLeft(applyAttacker);
       else setRight(applyAttacker);
-      const whiff = `${attackerName}'s ${move.name} whiffs — ${defenderName} stays out of range!`;
+      const why = !inReach
+        ? `${defenderName} is out of range`
+        : `${defenderName} slipped to the flank`;
+      const whiff = `${attackerName}'s ${move.name} whiffs — ${why}!`;
       setLog((prev) => [whiff, ...prev.slice(0, 4)]);
       return;
     }
@@ -913,33 +1096,36 @@ export function Arena3D() {
     const dmg = Math.round(damageFor(move) * (defenderBusy ? 1.6 : 1));
     const bal = Math.round(balanceDamageFor(move) * (defenderBusy ? 1.35 : 1));
     const knock = 0.18 + move.speed / 500;
+    // Knockback pushes the defender directly away from the attacker.
+    const knockX = (dx / gap) * knock;
+    const knockZ = (dz / gap) * knock;
 
-    const applyDefender =
-      (dir: 1 | -1) =>
-      (p: FighterState): FighterState => {
-        const newBalance = clamp(p.balance - bal);
-        const hardStagger = newBalance < 12;
-        const staggered = newBalance < 35;
-        // Getting hit interrupts you: a stagger locks recovery (and breaks any
-        // attack you were winding up), so trades have real consequences.
-        const stunMs = hardStagger ? 950 : staggered ? 620 : 150;
-        return {
-          ...p,
-          hp: clamp(p.hp - dmg),
-          balance: newBalance,
-          x: dir === 1 ? Math.min(1.55, p.x + knock) : Math.max(-1.55, p.x - knock),
-          hitFlash: 1,
-          recoverUntil: Math.max(p.recoverUntil, now + stunMs),
-          stance: staggered ? "knockdown" : "recovering",
-        };
+    const applyDefender = (p: FighterState): FighterState => {
+      const newBalance = clamp(p.balance - bal);
+      const hardStagger = newBalance < 12;
+      const staggered = newBalance < 35;
+      // Getting hit interrupts you: a stagger locks recovery (and breaks any
+      // attack you were winding up), so trades have real consequences.
+      const stunMs = hardStagger ? 950 : staggered ? 620 : 150;
+      const [kx, kz] = clampToBox(p.x + knockX, p.z + knockZ, BOUND_X, BOUND_Z);
+      return {
+        ...p,
+        hp: clamp(p.hp - dmg),
+        balance: newBalance,
+        x: kx,
+        z: kz,
+        hitFlash: 1,
+        recoverUntil: Math.max(p.recoverUntil, now + stunMs),
+        stance: staggered ? "knockdown" : "recovering",
       };
+    };
 
     if (side === "left") {
       setLeft(applyAttacker);
-      setRight(applyDefender(1));
+      setRight(applyDefender);
     } else {
       setRight(applyAttacker);
-      setLeft(applyDefender(-1));
+      setLeft(applyDefender);
     }
 
     const counterTag = defenderBusy ? " (counter!)" : "";
@@ -958,6 +1144,9 @@ export function Arena3D() {
       balance: 100,
       stamina: 100,
       x: -1.15,
+      z: 0,
+      facing: 0,
+      walk: 0,
       hitFlash: 0,
       recoverUntil: 0,
       stance: "stable",
@@ -968,6 +1157,9 @@ export function Arena3D() {
       balance: 100,
       stamina: 100,
       x: 1.15,
+      z: 0,
+      facing: Math.PI,
+      walk: 0,
       hitFlash: 0,
       recoverUntil: 0,
       stance: "stable",
@@ -1083,13 +1275,13 @@ export function Arena3D() {
           <div className="absolute left-4 top-4 space-y-1 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
             <div>Drag to rotate · scroll/pinch to zoom · right-drag to pan</div>
             <div className="text-[#8888a0]">
-              Move: <span className="text-[#3dd68c]">P1 A / D</span>
+              Move: <span className="text-[#3dd68c]">P1 WASD</span>
               {rightIsAI ? (
                 <> · <span className="text-[#ff5c5c]">P2 auto</span></>
               ) : (
-                <> · <span className="text-[#ff5c5c]">P2 ← / →</span></>
+                <> · <span className="text-[#ff5c5c]">P2 arrows</span></>
               )}{" "}
-              · close the distance to land hits
+              · circle in to land, flank to dodge
             </div>
           </div>
           <Image
