@@ -5,7 +5,10 @@ import Image from "next/image";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import URDFLoader from "urdf-loader";
-import type { MoveRecord } from "@/lib/types";
+import type { MoveCard, MoveRecord } from "@/lib/types";
+import { getPersona, listPersonas, makePersonaController } from "@/lib/enemy/personas";
+import { makeRng } from "@/lib/enemy/rng";
+import type { FighterController } from "@/lib/enemy/types";
 
 type PlayerSide = "left" | "right";
 
@@ -236,7 +239,11 @@ export function Arena3D() {
   const rightImpactRef = useRef<THREE.Mesh | null>(null);
   const leftStateRef = useRef<FighterState | null>(null);
   const rightStateRef = useRef<FighterState | null>(null);
+  const deckCardsRef = useRef<MoveCard[]>([]);
+  const playMoveRef = useRef<((side: PlayerSide, move: ArenaMove) => void) | null>(null);
   const [moves, setMoves] = useState<ArenaMove[]>([]);
+  const [deckCards, setDeckCards] = useState<MoveCard[]>([]);
+  const [personaId, setPersonaId] = useState<string>("");
   const [left, setLeft] = useState<FighterState>({
     name: "Player 1",
     hp: 100,
@@ -270,10 +277,9 @@ export function Arena3D() {
     fetch("/api/moves")
       .then((r) => r.json())
       .then((records: MoveRecord[]) => {
-        const scored = records
-          .filter((r) => r.move_card.verdict !== "pending")
-          .map(toArenaMove);
-        setMoves(scored.length ? scored : []);
+        const usable = records.filter((r) => r.move_card.verdict !== "pending");
+        setMoves(usable.map(toArenaMove));
+        setDeckCards(usable.map((r) => r.move_card));
       });
   }, []);
 
@@ -299,6 +305,80 @@ export function Arena3D() {
     [],
   );
   const usableMoves = moves.length ? moves : fallbackMoves;
+
+  // Full MoveCards for the enemy brain (it reads the SAME scored stats the
+  // scorer computes). Falls back to synthetic cards mirroring fallbackMoves.
+  const usableDeck = useMemo<MoveCard[]>(() => {
+    if (deckCards.length) return deckCards;
+    return fallbackMoves.map((m) => ({
+      id: m.id,
+      name: m.name,
+      source: "sonic_zip" as const,
+      attack_type: "strike_combo",
+      studio_sonic_validated: false,
+      stats: {
+        speed: m.speed,
+        power: m.power,
+        smoothness: 80,
+        balance_risk: m.balanceRisk,
+        recovery: m.recovery,
+        deployability: 60,
+      },
+      verdict: "needs_edits" as const,
+      coach_feedback: "",
+      created_at: "1970-01-01T00:00:00.000Z",
+      pipeline: { data: "fallback", eval: "fallback", deploy: "fallback" },
+    }));
+  }, [deckCards, fallbackMoves]);
+
+  useEffect(() => {
+    deckCardsRef.current = usableDeck;
+  }, [usableDeck]);
+
+  // AI opponent: when a persona is selected it drives Player 2 through the same
+  // controller contract as the headless arena. The per-frame decide() runs on
+  // the existing decay-tick cadence; NO LLM in this loop.
+  useEffect(() => {
+    if (!personaId) return;
+    const persona = getPersona(personaId);
+    if (!persona) return;
+    setRight((p) => ({ ...p, name: persona.name }));
+    const controller: FighterController = makePersonaController(persona);
+    const rng = makeRng(0xa1 + personaId.length);
+    let tick = 0;
+    const timer = setInterval(() => {
+      const ls = leftStateRef.current;
+      const rs = rightStateRef.current;
+      const deck = deckCardsRef.current;
+      if (!ls || !rs || !deck.length) return;
+      if (ls.hp <= 0 || rs.hp <= 0) return; // match decided
+      if (rs.attacking) return; // mid-animation
+      tick += 1;
+      const action = controller.decide(
+        {
+          tick,
+          rateHz: 25,
+          self: { hp: rs.hp, x: rs.x, balance: rs.balance, stamina: 100, cooldown: 0, stance: "stable" },
+          opponent: {
+            hp: ls.hp,
+            x: ls.x,
+            balance: ls.balance,
+            stamina: 100,
+            cooldown: ls.attacking ? 1 : 0,
+            stance: ls.attacking ? "extended" : "stable",
+          },
+          deck,
+          range: Math.abs(ls.x - rs.x),
+        },
+        rng,
+      );
+      if (action.kind === "move") {
+        const am = usableMoves.find((m) => m.id === action.moveId) ?? usableMoves[0];
+        if (am) playMoveRef.current?.("right", am);
+      }
+    }, 260);
+    return () => clearInterval(timer);
+  }, [personaId, usableMoves]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -469,6 +549,7 @@ export function Arena3D() {
       ...prev.slice(0, 4),
     ]);
   }
+  playMoveRef.current = playMove;
 
   function reset() {
     setLeft((p) => ({ ...p, hp: 100, balance: 100, x: -1.15, hitFlash: 0 }));
@@ -491,12 +572,29 @@ export function Arena3D() {
               Two G1-inspired fighters face off using scored robot move cards.
             </p>
           </div>
-          <button
-            onClick={reset}
-            className="rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
-          >
-            Reset round
-          </button>
+          <div className="flex items-center gap-3">
+            <label className="flex flex-col gap-1 text-xs text-[#8888a0]">
+              <span className="uppercase tracking-[0.18em]">Player 2 AI</span>
+              <select
+                value={personaId}
+                onChange={(e) => setPersonaId(e.target.value)}
+                className="rounded-lg border border-[#2a2a3d] bg-[#14141f] px-3 py-2 text-sm text-[#e8e8f0] outline-none focus:border-[#7c5cff]"
+              >
+                <option value="">Manual (human)</option>
+                {listPersonas().map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              onClick={reset}
+              className="self-end rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
+            >
+              Reset round
+            </button>
+          </div>
         </div>
 
         <div className="grid gap-3 p-4 md:grid-cols-[1fr_240px_1fr]">
