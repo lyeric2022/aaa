@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import URDFLoader from "urdf-loader";
-import { G1_MUJOCO_JOINT_NAMES } from "@/lib/g1Motion";
+import { G1_MUJOCO_JOINT_NAMES, G1_URDF_FLOOR_Y } from "@/lib/g1Motion";
 import { applyCameraFrame } from "@/lib/cameraFrame";
 import { useCameraDebug } from "@/lib/useCameraDebug";
 import { CameraDebugPanel } from "@/components/CameraDebugPanel";
@@ -48,7 +48,7 @@ function addG1UrdfSkin(robot: THREE.Group) {
     (urdf: URDFRobotLike) => {
       urdf.name = "g1_replay_skin";
       urdf.rotation.x = -Math.PI / 2;
-      urdf.position.y = 0.82;
+      urdf.position.y = G1_URDF_FLOOR_Y;
       urdf.scale.setScalar(1.08);
       urdf.traverse((obj) => {
         obj.castShadow = true;

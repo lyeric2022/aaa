@@ -1,119 +1,200 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { JudgeResult } from "@/lib/judge";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { JudgeVerdict, Verdict } from "@/lib/types";
+import { VerdictBadge } from "@/components/StatBar";
 
-export function LiveJudgePanel({ moveId }: { moveId: string }) {
-  const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
-  const [result, setResult] = useState<JudgeResult | null>(null);
+function verdictFromJudge(deployable: boolean, score: number): Verdict {
+  if (deployable) return "safe";
+  if (score >= 0.45) return "needs_edits";
+  return "unsafe";
+}
+
+export function LiveJudgePanel({
+  moveId,
+  moveName,
+  stats,
+  initialJudge,
+}: {
+  moveId: string;
+  moveName: string;
+  stats: {
+    speed: number;
+    smoothness: number;
+    balance_risk: number;
+    recovery: number;
+  };
+  initialJudge?: JudgeVerdict | null;
+}) {
+  const [judge, setJudge] = useState<JudgeVerdict | null>(initialJudge ?? null);
+  const [loading, setLoading] = useState(!initialJudge);
   const [error, setError] = useState("");
+  const judgeInflight = useRef<Promise<void> | null>(null);
 
-  const run = useCallback(async () => {
-    setStatus("loading");
+  useEffect(() => {
+    setJudge(initialJudge ?? null);
+    setLoading(!initialJudge);
     setError("");
-    try {
-      const res = await fetch(`/api/moves/${moveId}/judge`, { method: "POST" });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `HTTP ${res.status}`);
+    judgeInflight.current = null;
+  }, [moveId, initialJudge]);
+
+  const runJudge = useCallback(async () => {
+    if (judgeInflight.current) {
+      await judgeInflight.current;
+      return;
+    }
+
+    const task = (async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const res = await fetch(`/api/moves/${moveId}/judge`, {
+          method: "POST",
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Judge request failed");
+        }
+        setJudge(data.judge as JudgeVerdict);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Judge request failed");
+      } finally {
+        setLoading(false);
       }
-      setResult((await res.json()) as JudgeResult);
-      setStatus("idle");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Judge failed");
-      setStatus("error");
+    })();
+
+    judgeInflight.current = task;
+    try {
+      await task;
+    } finally {
+      if (judgeInflight.current === task) {
+        judgeInflight.current = null;
+      }
     }
   }, [moveId]);
 
   useEffect(() => {
-    void run();
-  }, [run]);
+    void runJudge();
+  }, [runJudge]);
 
   return (
     <div className="bg-[#14141f] border border-[#2a2a3d] rounded-2xl p-6">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-xs uppercase tracking-wider text-[#8888a0]">
-            Fetch.ai · ASI:One
-          </p>
-          <h2 className="text-lg font-semibold">Live deployability judge</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-[#a78bfa]">
+            Fetch.ai Live Judge
+          </h2>
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#7c5cff]/15 text-[#c4b5fd] border border-[#7c5cff]/30">
+            ASI:One + Coach
+          </span>
         </div>
         <button
-          onClick={run}
-          disabled={status === "loading"}
-          className="rounded-lg border border-[#7c5cff]/40 bg-[#7c5cff]/10 px-4 py-2 text-sm font-medium text-[#c4b5fd] transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/20 disabled:opacity-60"
+          type="button"
+          onClick={() => void runJudge()}
+          disabled={loading}
+          className="text-xs px-3 py-1.5 rounded-lg border border-[#2a2a3d] text-[#8888a0] hover:text-white hover:border-[#7c5cff]/50 disabled:opacity-50 transition"
         >
-          {status === "loading" ? "Judging via ASI:One…" : result ? "Re-run live judge" : "Run live judge"}
+          {loading ? "Judging…" : "Re-judge"}
         </button>
       </div>
 
-      <p className="text-sm leading-relaxed text-[#8888a0]">
-        Dynamically sends this card&apos;s latest stats to the Judge uAgent
-        (deterministic safety gate + ASI:One). If it is not deployable, the
-        Judge consults the Coach uAgent for targeted fixes.
+      <p className="text-xs text-[#8888a0] mb-4 leading-relaxed">
+        Judging <strong className="text-[#c4b5fd]">{moveName}</strong> from
+        motion stats via the Judge uAgent and Coach uAgent. Identical stats
+        produce the same verdict; re-ingest each SONIC zip to score unique
+        motion.
       </p>
 
-      {status === "loading" && !result && (
-        <div className="mt-4 rounded-lg border border-[#2a2a3d] bg-[#0f0f18] p-3 text-sm text-[#8888a0]">
-          Calling the live Judge/Coach workflow…
-        </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4 text-xs">
+        {(
+          [
+            ["balance_risk", stats.balance_risk, true],
+            ["smoothness", stats.smoothness, false],
+            ["recovery", stats.recovery, false],
+            ["speed", stats.speed, false],
+          ] as const
+        ).map(([label, value, risk]) => (
+          <div
+            key={label}
+            className="rounded-lg border border-[#2a2a3d] bg-[#0e0e16] px-2 py-1.5"
+          >
+            <span className="text-[#666680] uppercase tracking-wide">{label}</span>
+            <div className={risk ? "text-[#ff8a8a]" : "text-white"}>
+              {value.toFixed(1)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {loading && !judge && (
+        <p className="text-sm text-[#8888a0] animate-pulse">
+          Sending move stats to the Fetch.ai Judge bridge…
+        </p>
       )}
 
-      {status === "error" && (
-        <div className="mt-4 rounded-lg border border-[#ff5c5c]/30 bg-[#ff5c5c]/10 p-3 text-sm text-[#ff8a8a]">
+      {error && (
+        <div className="p-4 rounded-lg bg-[#ff5c5c]/10 border border-[#ff5c5c]/30 text-sm text-[#ffb4b4]">
           {error}
         </div>
       )}
 
-      {result && (
-        <div className="mt-5">
+      {judge && (
+        <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-3">
-            <span
-              className={`inline-block rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wide ${
-                result.deployable
-                  ? "bg-[#3dd68c]/15 text-[#3dd68c]"
-                  : "bg-[#ff5c5c]/15 text-[#ff5c5c]"
-              }`}
-            >
-              {result.deployable ? "Deployable" : "Not deployable"}
-            </span>
+            <VerdictBadge verdict={verdictFromJudge(judge.deployable, judge.score)} />
             <span className="text-sm text-[#8888a0]">
-              score <span className="font-semibold text-white">{result.score}</span>
+              deployability score{" "}
+              <strong className="text-white">
+                {(judge.score * 100).toFixed(1)}
+              </strong>
+              / 100
             </span>
-            {result.source && (
+            <span className="text-xs text-[#666680]">
+              judged {new Date(judge.judged_at).toLocaleString()}
+            </span>
+            {judge.source && (
               <span className="rounded bg-[#7c5cff]/10 px-2 py-1 text-[11px] uppercase tracking-wide text-[#a78bfa]">
-                {result.source === "judge_uagent" ? "via Judge uAgent" : "core fallback"}
+                {judge.source === "judge_uagent" ? "via Judge uAgent" : "core fallback"}
               </span>
             )}
           </div>
 
-          {result.failing_dims.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {result.failing_dims.map((d) => (
-                <span
-                  key={d}
-                  className="rounded bg-[#ff5c5c]/10 px-2 py-1 text-[11px] text-[#ff8a8a]"
-                >
-                  {d}
-                </span>
-              ))}
-            </div>
-          )}
+          <div className="p-4 bg-[#0e0e16] border border-[#2a2a3d] rounded-lg">
+            <p className="text-xs uppercase tracking-wider text-[#8888a0] mb-2">
+              Judge
+            </p>
+            <p className="text-sm leading-relaxed whitespace-pre-line">
+              {judge.reasoning}
+            </p>
+            {judge.failing_dims.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {judge.failing_dims.map((dim) => (
+                  <span
+                    key={dim}
+                    className="text-[10px] px-2 py-1 rounded bg-[#ff5c5c]/12 text-[#ff8a8a] uppercase tracking-wide"
+                  >
+                    {dim}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
 
-          <p className="mt-3 text-sm leading-relaxed text-[#b7b7c8]">
-            {result.reasoning}
-          </p>
-
-          {result.coach_summary && (
-            <div className="mt-4 rounded-r-lg border-l-2 border-[#7c5cff] bg-[#7c5cff]/10 p-4 text-sm leading-relaxed">
-              <strong className="text-[#a78bfa]">Coach:</strong>{" "}
-              {result.coach_summary}
-              {result.fixes && (
-                <ul className="mt-2 list-disc pl-5 text-[#c8c8d4]">
-                  {Object.entries(result.fixes).map(([dim, fix]) => (
-                    <li key={dim} className="mt-1">
-                      <span className="font-semibold text-white">{dim}:</span>{" "}
-                      {fix}
+          {(judge.coach_summary || judge.fixes) && (
+            <div className="p-4 bg-[#7c5cff]/10 border-l-2 border-[#7c5cff] rounded-r-lg">
+              <p className="text-xs uppercase tracking-wider text-[#a78bfa] mb-2">
+                Coach
+              </p>
+              {judge.coach_summary && (
+                <p className="text-sm leading-relaxed mb-3 whitespace-pre-line">
+                  {judge.coach_summary}
+                </p>
+              )}
+              {judge.fixes && (
+                <ul className="space-y-2 text-sm leading-relaxed">
+                  {Object.entries(judge.fixes).map(([dim, fix]) => (
+                    <li key={dim}>
+                      <strong className="text-[#c4b5fd]">{dim}:</strong> {fix}
                     </li>
                   ))}
                 </ul>

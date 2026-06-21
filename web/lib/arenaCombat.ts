@@ -180,12 +180,23 @@ export function balanceDamageFor(move: ArenaMove) {
   return Math.round(5 + move.balanceRisk * 0.25 + move.power * 0.12);
 }
 
+export function isBlockMove(move: Pick<ArenaMove, "id">): boolean {
+  return move.id === "block";
+}
+
 export function staminaCostFor(move: ArenaMove) {
+  if (isBlockMove(move)) return 8;
   return Math.round(18 + move.power * 0.5 + move.speed * 0.1);
 }
 
 export function recoveryMsFor(move: ArenaMove) {
+  if (isBlockMove(move)) return 700;
   return Math.round(320 + (100 - move.recovery) * 4.5 + move.power * 3);
+}
+
+/** Minimum stamina needed to commit a move (block is cheap; strikes need a wind-up buffer). */
+export function minStaminaToUse(move: ArenaMove): number {
+  return isBlockMove(move) ? staminaCostFor(move) : MIN_STAMINA_TO_ACT;
 }
 
 export function createFighter(name: string, x: number, facing = 0): FighterState {
@@ -232,6 +243,19 @@ export function winnerFor(left: FighterState, right: FighterState): string | nul
   return null;
 }
 
+/** True when the defender is mid-block animation and their guard faces the attacker. */
+export function isBlocking(defender: FighterState, attacker: FighterState, now: number): boolean {
+  if (defender.attackMoveId !== "block") return false;
+  if (now - defender.attackStart >= attackAnimMs("block")) return false;
+  const dx = attacker.x - defender.x;
+  const dz = attacker.z - defender.z;
+  const gap = Math.hypot(dx, dz) || 1e-4;
+  const fwdX = Math.cos(defender.facing);
+  const fwdZ = -Math.sin(defender.facing);
+  const aimDot = (fwdX * dx + fwdZ * dz) / gap;
+  return aimDot >= HIT_CONE_COS;
+}
+
 export type MoveResult = {
   left: FighterState;
   right: FighterState;
@@ -263,8 +287,16 @@ export function applyMove(
     attackAnim: move.anim,
     stamina: clamp(attacker.stamina - cost),
     recoverUntil: now + recoverMs,
-    stance: "recovering",
+    stance: isBlockMove(move) ? "stable" : "recovering",
   };
+
+  // Block is purely defensive — no strike resolution.
+  if (isBlockMove(move)) {
+    const logLine = `${attacker.name} raises guard!`;
+    const nextLeft = side === "left" ? attackerUpdate : left;
+    const nextRight = side === "right" ? attackerUpdate : right;
+    return { left: nextLeft, right: nextRight, logLine, hit: false };
+  }
 
   // 2D hit check: the strike only lands when the opponent is within lunge reach
   // AND inside the attacker's frontal cone. A whiff still commits the attacker
@@ -289,7 +321,24 @@ export function applyMove(
   }
 
   // Counter hit: striking a recovering or mid-attack opponent lands harder.
-  const defenderBusy = now < defender.recoverUntil || defender.attacking;
+  // Active guard blocks the blow; whiffing into a block still costs the attacker.
+  const defenderBlocking = isBlocking(defender, attacker, now);
+  const defenderBusy =
+    !defenderBlocking && (now < defender.recoverUntil || defender.attacking);
+
+  if (defenderBlocking) {
+    const blockStaminaCost = 4;
+    const defenderUpdate: FighterState = {
+      ...defender,
+      stamina: clamp(defender.stamina - blockStaminaCost),
+      hitFlash: 0.35,
+    };
+    const logLine = `${defender.name} blocks ${attacker.name}'s ${move.name}!`;
+    const nextLeft = side === "left" ? attackerUpdate : defenderUpdate;
+    const nextRight = side === "right" ? attackerUpdate : defenderUpdate;
+    return { left: nextLeft, right: nextRight, logLine, hit: false };
+  }
+
   const dmg = Math.round(damageFor(move) * (defenderBusy ? 1.6 : 1));
   const bal = Math.round(balanceDamageFor(move) * (defenderBusy ? 1.35 : 1));
   const knock = 0.18 + move.speed / 500;
