@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import URDFLoader from "urdf-loader";
 import type { MoveRecord } from "@/lib/types";
+import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
 
 type PlayerSide = "left" | "right";
 
@@ -260,11 +261,25 @@ export function Arena3D() {
   const [log, setLog] = useState<string[]>([
     "Choose a move. Each robot can play robot-skill cards like Street Fighter specials.",
   ]);
+  const [announcerOn, setAnnouncerOn] = useState(true);
+  const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
+  const koSpokenRef = useRef(false);
 
   useEffect(() => {
     leftStateRef.current = left;
     rightStateRef.current = right;
   }, [left, right]);
+
+  useEffect(() => {
+    announcer.setEnabled(announcerOn);
+  }, [announcerOn]);
+
+  useEffect(() => {
+    fetch("/api/tts")
+      .then((res) => res.json())
+      .then((data: { configured?: boolean }) => setAnnouncerReady(Boolean(data.configured)))
+      .catch(() => setAnnouncerReady(false));
+  }, []);
 
   useEffect(() => {
     fetch("/api/moves")
@@ -464,19 +479,30 @@ export function Arena3D() {
       }));
     }
 
-    setLog((prev) => [
-      `${attackerName} plays ${move.name}: ${dmg} HP, ${bal} balance damage to ${defenderName}.`,
-      ...prev.slice(0, 4),
-    ]);
+    const line = battleCall(attackerName, defenderName, move, dmg);
+    setLog((prev) => [line, ...prev.slice(0, 4)]);
+    void announcer.speak(line);
   }
 
   function reset() {
+    koSpokenRef.current = false;
     setLeft((p) => ({ ...p, hp: 100, balance: 100, x: -1.15, hitFlash: 0 }));
     setRight((p) => ({ ...p, hp: 100, balance: 100, x: 1.15, hitFlash: 0 }));
-    setLog(["Round reset. Pick a move for either robot."]);
+    const line = resetCall();
+    setLog([line]);
+    void announcer.speak(line);
   }
 
   const winner = left.hp <= 0 ? right.name : right.hp <= 0 ? left.name : null;
+
+  useEffect(() => {
+    if (!winner || koSpokenRef.current) return;
+    koSpokenRef.current = true;
+    const loser = winner === left.name ? right.name : left.name;
+    const line = koCall(winner, loser);
+    setLog((prev) => [line, ...prev.slice(0, 4)]);
+    void announcer.speak(line);
+  }, [winner, left.name, right.name]);
 
   return (
     <div className="space-y-5">
@@ -489,14 +515,31 @@ export function Arena3D() {
             <h1 className="text-2xl font-bold">3D robot-sports duel</h1>
             <p className="text-sm text-[#8888a0]">
               Two G1-inspired fighters face off using scored robot move cards.
+              {announcerReady === false && (
+                <span className="mt-1 block text-[#f5a623]">
+                  Deepgram voice off — add DEEPGRAM_API_KEY to web/.env.local
+                </span>
+              )}
             </p>
           </div>
-          <button
-            onClick={reset}
-            className="rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
-          >
-            Reset round
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setAnnouncerOn((on) => !on)}
+              className={`rounded-lg border px-4 py-2 text-sm transition ${
+                announcerOn
+                  ? "border-[#3dd68c]/50 bg-[#3dd68c]/10 text-[#3dd68c]"
+                  : "border-[#2a2a3d] text-[#8888a0] hover:border-[#7c5cff]"
+              }`}
+            >
+              {announcerOn ? "🔊 Announcer on" : "🔇 Announcer off"}
+            </button>
+            <button
+              onClick={reset}
+              className="rounded-lg border border-[#2a2a3d] px-4 py-2 text-sm hover:border-[#7c5cff]"
+            >
+              Reset round
+            </button>
+          </div>
         </div>
 
         <div className="grid gap-3 p-4 md:grid-cols-[1fr_240px_1fr]">

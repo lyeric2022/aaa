@@ -6,9 +6,11 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:deepgram": "node --env-file=.env.local scripts/test-deepgram.mjs"
   },
   "dependencies": {
+    "@deepgram/sdk": "^5.4.0",
     "adm-zip": "^0.5.17",
     "next": "15.5.19",
     "react": "19.1.0",
