@@ -7,6 +7,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import URDFLoader from "urdf-loader";
 import type { MoveRecord } from "@/lib/types";
 import { announcer, battleCall, koCall, resetCall } from "@/lib/announcer";
+import { applyCameraFrame } from "@/lib/cameraFrame";
+import { useCameraDebug } from "@/lib/useCameraDebug";
+import { CameraDebugPanel } from "@/components/CameraDebugPanel";
 
 type PlayerSide = "left" | "right";
 
@@ -196,7 +199,7 @@ function setRobotPose(
   hitFlash: number,
 ) {
   const direction = side === "left" ? 1 : -1;
-  robot.rotation.y = side === "left" ? 0 : -Math.PI / 2;
+  robot.rotation.y = side === "left" ? 0 : Math.PI;
   robot.position.y = hitFlash > 0 ? Math.sin(hitFlash * Math.PI * 6) * 0.015 : 0;
 
   const rightUpper = robot.getObjectByName("rightUpperArm");
@@ -275,6 +278,8 @@ export function Arena3D() {
   const [announcerOn, setAnnouncerOn] = useState(true);
   const [announcerReady, setAnnouncerReady] = useState<boolean | null>(null);
   const koSpokenRef = useRef(false);
+  const { frame: cameraFrame, defaultFrame: cameraDefault, syncFromScene, resetToDefault } =
+    useCameraDebug("arena");
 
   useEffect(() => {
     leftStateRef.current = left;
@@ -335,8 +340,6 @@ export function Arena3D() {
     scene.background = new THREE.Color("#07070d");
 
     const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
-    camera.position.set(0, 1.85, 4.35);
-    camera.lookAt(0, 1.0, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -344,7 +347,7 @@ export function Arena3D() {
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0, 1.05, 0);
+    applyCameraFrame(camera, controls, cameraDefault);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = true;
@@ -425,6 +428,7 @@ export function Arena3D() {
         rightImpact.scale.setScalar(0.6 + rightProgress * 2.2);
       }
       controls.update();
+      syncFromScene(camera, controls);
       renderer.render(scene, camera);
     };
     loop();
@@ -571,6 +575,12 @@ export function Arena3D() {
 
         <div className="relative">
           <div ref={hostRef} className="h-[560px]" />
+          <CameraDebugPanel
+            label="Arena camera"
+            frame={cameraFrame}
+            defaultFrame={cameraDefault}
+            onReset={resetToDefault}
+          />
           <div className="absolute left-4 top-4 rounded-lg border border-[#2a2a3d] bg-black/60 px-3 py-2 text-xs text-[#e8e8f0] backdrop-blur">
             Drag to rotate · scroll/pinch to zoom · right-drag to pan
           </div>
