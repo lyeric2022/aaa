@@ -22,7 +22,7 @@ import {
   clampToBox,
   createFighter,
   decayFighter,
-  MIN_STAMINA_TO_ACT,
+  minStaminaToUse,
   MOVE_SPEED,
   staminaCostFor,
   animForStats,
@@ -32,7 +32,7 @@ import {
   type MoveAnim,
   type PlayerSide,
 } from "@/lib/arenaCombat";
-import { applyG1JointFrame } from "@/lib/g1Motion";
+import { applyG1JointFrame, G1_URDF_FLOOR_Y } from "@/lib/g1Motion";
 import { applyCameraFrame, CAMERA_DEFAULTS } from "@/lib/cameraFrame";
 import { buildArenaShareUrl, useArenaMultiplayer } from "@/lib/useArenaMultiplayer";
 import { addArenaBackground, applyRopeContacts } from "@/lib/arenaEnvironment";
@@ -60,14 +60,15 @@ function prettifyName(raw: string): string {
 
 function toArenaMove(record: MoveRecord): ArenaMove {
   const { speed, power, balance_risk: balanceRisk, recovery } = record.move_card.stats;
+  const id = record.move_card.id;
   return {
-    id: record.move_card.id,
-    name: prettifyName(record.move_card.name || record.move_card.id),
+    id,
+    name: prettifyName(record.move_card.name || id),
     speed,
     power,
     balanceRisk,
     recovery,
-    anim: animForStats(speed, power, balanceRisk),
+    anim: id === "block" ? "guard" : animForStats(speed, power, balanceRisk),
   };
 }
 
@@ -115,7 +116,7 @@ function addG1UrdfSkin(robot: THREE.Group, accent: string) {
       // URDFLoader preserves ROS coordinates (Z-up). The arena is Three.js
       // Y-up, so rotate the whole robot into the arena and lift its feet.
       urdf.rotation.x = -Math.PI / 2;
-      urdf.position.y = 0.82;
+      urdf.position.y = G1_URDF_FLOOR_Y;
       urdf.scale.setScalar(1.08);
       urdf.traverse((obj) => {
         obj.castShadow = true;
@@ -478,7 +479,8 @@ export function Arena3D() {
   useEffect(() => {
     const onFullscreenChange = () => {
       setIsFullscreen(document.fullscreenElement === viewportRef.current);
-      resizeSceneRef.current?.();
+      // Layout settles one frame after the browser resizes the fullscreen element.
+      requestAnimationFrame(() => resizeSceneRef.current?.());
     };
     document.addEventListener("fullscreenchange", onFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
@@ -721,11 +723,13 @@ export function Arena3D() {
     const scene = new THREE.Scene();
     const env = addArenaBackground(scene);
 
-    const camera = new THREE.PerspectiveCamera(45, host.clientWidth / 560, 0.1, 100);
+    const initW = host.clientWidth || 800;
+    const initH = host.clientHeight || 560;
+    const camera = new THREE.PerspectiveCamera(45, initW / initH, 0.1, 100);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(host.clientWidth, 560);
+    renderer.setSize(initW, initH);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     host.appendChild(renderer.domElement);
@@ -830,7 +834,8 @@ export function Arena3D() {
     const resize = () => {
       if (!hostRef.current) return;
       const width = hostRef.current.clientWidth;
-      const height = hostRef.current.clientHeight || 560;
+      const height = hostRef.current.clientHeight;
+      if (width < 1 || height < 1) return;
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
@@ -838,9 +843,12 @@ export function Arena3D() {
     resizeSceneRef.current = resize;
     resize();
     window.addEventListener("resize", resize);
+    const ro = new ResizeObserver(() => resize());
+    ro.observe(host);
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
+      ro.disconnect();
       resizeSceneRef.current = null;
       controls.dispose();
       renderer.dispose();
@@ -942,16 +950,16 @@ export function Arena3D() {
       const slot = Number(e.key);
       if (!Number.isInteger(slot) || slot < 1 || slot > 4) return;
 
-      const move = usableMoves[slot - 1];
-      if (!move) return;
-
       const ls = leftStateRef.current;
       const rs = rightStateRef.current;
       if (!ls || !rs || ls.hp <= 0 || rs.hp <= 0) return;
 
       const now = Date.now();
       const self = playerSide === "left" ? ls : rs;
-      if (now < self.recoverUntil || self.stamina < MIN_STAMINA_TO_ACT) return;
+      if (now < self.recoverUntil) return;
+
+      const move = usableMoves[slot - 1];
+      if (!move || self.stamina < minStaminaToUse(move)) return;
 
       e.preventDefault();
       playMoveRef.current?.(playerSide, move);
@@ -983,8 +991,8 @@ export function Arena3D() {
   // Re-evaluated every render (the 40ms decay tick re-renders), so buttons grey
   // out while a fighter is staggered/recovering or too winded to act.
   const renderNow = Date.now();
-  const leftBusy = renderNow < left.recoverUntil || left.stamina < MIN_STAMINA_TO_ACT;
-  const rightBusy = renderNow < right.recoverUntil || right.stamina < MIN_STAMINA_TO_ACT;
+  const leftBusy = renderNow < left.recoverUntil;
+  const rightBusy = renderNow < right.recoverUntil;
   // Player 2 is auto-piloted while a real AI persona is selected.
   const rightIsAI = aiPersonaId !== "";
   const shareUrl =
@@ -1106,9 +1114,9 @@ export function Arena3D() {
 
         <div
           ref={viewportRef}
-          className="relative bg-[#060707] [&:fullscreen]:h-full [&:fullscreen]:w-full"
+          className="relative h-[560px] w-full bg-[#060707] [&:fullscreen]:fixed [&:fullscreen]:inset-0 [&:fullscreen]:z-50 [&:fullscreen]:h-dvh [&:fullscreen]:w-dvw"
         >
-          <div ref={hostRef} className="h-[560px] [&:fullscreen]:h-full" />
+          <div ref={hostRef} className="h-full w-full" />
           <button
             type="button"
             onClick={toggleFullscreen}
@@ -1148,6 +1156,7 @@ export function Arena3D() {
         }
         side={playerSide}
         moves={usableMoves}
+        stamina={playerSide === "left" ? left.stamina : right.stamina}
         onPlay={playMove}
         disabled={!!winner || (playerSide === "left" ? leftBusy : rightBusy)}
       />
@@ -1156,6 +1165,7 @@ export function Arena3D() {
           title={rightIsAI ? `Player 2 moves (${right.name} AI)` : "Player 2 moves"}
           side={playerSide === "left" ? "right" : "left"}
           moves={usableMoves}
+          stamina={playerSide === "left" ? right.stamina : left.stamina}
           onPlay={playMove}
           disabled={!!winner || (playerSide === "left" ? rightBusy : leftBusy)}
         />
@@ -1232,12 +1242,14 @@ function MoveControls({
   title,
   side,
   moves,
+  stamina,
   onPlay,
   disabled,
 }: {
   title: string;
   side: PlayerSide;
   moves: ArenaMove[];
+  stamina: number;
   onPlay: (side: PlayerSide, move: ArenaMove) => void;
   disabled?: boolean;
 }) {
@@ -1248,11 +1260,13 @@ function MoveControls({
         <span className="ml-2 font-normal text-[#8888a0]">· keys 1–{Math.min(moves.length, 4)}</span>
       </p>
       <div className="grid gap-2">
-        {moves.slice(0, 4).map((move, index) => (
+        {moves.slice(0, 4).map((move, index) => {
+          const tooTired = stamina < minStaminaToUse(move);
+          return (
           <button
             key={`${side}-${move.id}`}
             onClick={() => onPlay(side, move)}
-            disabled={disabled}
+            disabled={disabled || tooTired}
             className="flex items-start gap-3 rounded-xl border border-[#2a2a3d] bg-black/25 p-3 text-left transition hover:border-[#7c5cff] hover:bg-[#7c5cff]/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[#2a2a3d] disabled:hover:bg-black/25"
           >
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#7c5cff]/40 bg-[#7c5cff]/10 font-mono text-sm font-bold text-[#a78bfa]">
@@ -1261,12 +1275,19 @@ function MoveControls({
             <span className="min-w-0">
               <div className="font-medium">{move.name}</div>
               <div className="mt-1 text-xs text-[#8888a0]">
-                speed {Math.round(move.speed)} · power {Math.round(move.power)} · risk{" "}
-                {Math.round(move.balanceRisk)}
+                {move.id === "block" ? (
+                  <>guard · stamina {staminaCostFor(move)}</>
+                ) : (
+                  <>
+                    speed {Math.round(move.speed)} · power {Math.round(move.power)} · risk{" "}
+                    {Math.round(move.balanceRisk)}
+                  </>
+                )}
               </div>
             </span>
           </button>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

@@ -1,3 +1,6 @@
+/** Vertical lift for G1 URDF skin so feet sit on the arena floor (Y-up, after Z→Y rotation). */
+export const G1_URDF_FLOOR_Y = 0.88;
+
 /** MuJoCo / Unitree SDK joint order for G1 29-DoF. */
 export const G1_MUJOCO_JOINT_NAMES = [
   "left_hip_pitch_joint",
